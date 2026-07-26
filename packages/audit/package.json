@@ -1,0 +1,40 @@
+{
+  "name": "@pegma/audit",
+  "version": "0.1.0",
+  "description": "Append-only audit records that commit in the caller's own transaction.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "dist/**/*.js",
+    "dist/**/*.js.map"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pegma-dev/audit.git",
+    "directory": "packages/audit"
+  },
+  "dependencies": {
+    "@pegma/spine": "0.1.1",
+    "@pegma/storage-core": "0.3.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build"
+  }
+}
