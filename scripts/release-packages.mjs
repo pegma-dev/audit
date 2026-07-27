@@ -434,7 +434,7 @@ async function verifyPreparedManifest(path) {
   const record = prepared.package;
   if (
     prepared.schemaVersion !== 1 ||
-    !/^[0-9a-f]{40}$/u.test(prepared.gitCommit) ||
+    !/^[0-9a-f]{40,64}$/u.test(prepared.gitCommit) ||
     prepared.releaseTag !== `v${record?.version}` ||
     record?.name !== PACKAGE.name ||
     !STABLE_SEMVER.test(record.version) ||
