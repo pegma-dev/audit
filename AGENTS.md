@@ -91,19 +91,19 @@ Every test that matters here is a test about atomicity. When adding behaviour,
 ask what happens when the caller's transaction is refused, and assert that this
 package left nothing behind.
 
-Publishing is trusted-publisher only; no tokens exist. A release is
-`gh release create vX.Y.Z`, which runs the gate and publishes every changed
-workspace package with a provenance attestation. The publish step is idempotent
-and dependency-ordered, so it skips versions already on the registry. A
-brand-new package cannot use trusted publishing for its first version: publish
-it once by hand, then add its trusted publisher on npmjs.com.
+Publishing is trusted-publisher only; no tokens exist. Follow
+`docs/RELEASING.md`: create and push a signed annotated version tag already on
+`origin/main`, then publish the GitHub release for that existing tag. The
+workflow prepares and verifies the package without OIDC, and the minimal
+environment-scoped publish job receives OIDC only for the exact prepared
+tarball. Never add a token fallback or an unprotected manual publish path.
 
 ## Where things stand
 
-`@pegma/audit` is at `0.1.0` and unpublished. It offers the event type and its
-codec, `defineAudit` binding the package to a caller's records, `action` for
-the atomic case, `append` for the case with no accompanying state change,
-`history`, and `sweep`.
+`@pegma/audit` is published at `0.1.0`. It offers the event type and its codec,
+`defineAudit` binding the package to a caller's records, `action` for the
+atomic case, `append` for the case with no accompanying state change, `history`,
+and `sweep`.
 
 Known gaps, in the order they are likely to matter:
 
