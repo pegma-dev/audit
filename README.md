@@ -8,7 +8,7 @@ the same transaction as the change they describe.
 
 > [!IMPORTANT]
 > Audit is in early `0.x` development. Its public API is not stable, its
-> package is not published, and it is not ready for production use.
+> package is published for evaluation, and it is not ready for production use.
 
 ## Why it exists
 
@@ -177,6 +177,9 @@ npm run format:check
 npm run check
 npm test
 ```
+
+Maintainer releases use npm trusted publishing and the signed-tag procedure in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

@@ -3,7 +3,7 @@
 ## Status
 
 **Stage:** Phase 1 complete; awaiting the first real consumer
-(`0.x`, public API unstable, unpublished)
+(`0.1.0` published, public API unstable)
 
 **Initial reference application:** RetireGolden, through
 `@pegma/authorization-core` and the Pegma support desk
@@ -275,7 +275,8 @@ already solved this its own way.
       stored twice so history cannot drift from the lifecycle. This package
       stores the payload; that is a real difference and it may be the right one
       or it may not.
-- [ ] Publish `0.1.0` by hand, then configure the trusted publisher.
+- [x] Publish `0.1.0`; future releases use the trusted publisher and the
+      signed-tag procedure in `RELEASING.md`.
 - [ ] Record what the migration had to work around, in this document.
 
 ### Phase 3 — second consumer and the shape's verdict
