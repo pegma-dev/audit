@@ -13,21 +13,25 @@ Findings were appended as they were discovered during the scan.
 
 ## Summary
 
-| # | Severity | Finding |
-|---|----------|---------|
-| 1 | Low | `__proto__` keys in `details` are silently dropped by the codec |
-| 2 | Low | `occurredAt` accepts non-ISO-8601 strings despite the `IsoTimestamp` contract |
-| 3 | Low | `decodeAuditEvent` decodes malformed records into plausible events instead of failing |
-| 4 | Low | Release validation requires `prepack` but does not forbid other install-time lifecycle scripts |
-| 5 | Low | Windows fallback in `runNpm` uses `shell: true` with unescaped arguments |
-| 6 | Low | Release workflow installs `npm@11.18.0` without an integrity pin |
-| 7 | Informational | `sweep` `limit` of `NaN` bypasses the positive-number guard |
-| 8 | Informational | Smoke test installs sibling dependencies from the registry without a lockfile |
-| 9 | Informational | Unbounded in-memory partition reads in `history` and `sweep`; unbounded `details` size |
-| 10 | Informational | `exports` target recursion in release validation is unbounded |
+| #   | Severity      | Finding                                                                                        | Disposition |
+| --- | ------------- | ---------------------------------------------------------------------------------------------- | ----------- |
+| 1   | Low           | `__proto__` keys in `details` are silently dropped by the codec                                | ✅ Resolved |
+| 2   | Low           | `occurredAt` accepts non-ISO-8601 strings despite the `IsoTimestamp` contract                  | ✅ Resolved |
+| 3   | Low           | `decodeAuditEvent` decodes malformed records into plausible events instead of failing          | ✅ Resolved |
+| 4   | Low           | Release validation requires `prepack` but does not forbid other install-time lifecycle scripts | ✅ Resolved |
+| 5   | Low           | Windows fallback in `runNpm` uses `shell: true` with unescaped arguments                       | ✅ Resolved |
+| 6   | Low           | Release workflow installs `npm@11.18.0` without an integrity pin                               | ✅ Resolved |
+| 7   | Informational | `sweep` `limit` of `NaN` bypasses the positive-number guard                                    | ✅ Resolved |
+| 8   | Informational | Smoke test installs sibling dependencies from the registry without a lockfile                  | ⚠️ Disputed |
+| 9   | Informational | Unbounded in-memory partition reads in `history` and `sweep`; unbounded `details` size         | ⚠️ Disputed |
+| 10  | Informational | `exports` target recursion in release validation is unbounded                                  | ⚠️ Disputed |
 
 **No high, medium, or critical vulnerabilities were found.** `npm audit`
 reports zero known vulnerabilities across 103 dependencies. All 24 tests pass.
+
+Every finding was re-examined against the code on 2026-07-29 and dispositioned
+below: seven were fixed, three were disputed. Each disputed item says why the
+observation, though accurate as a description, is not a weakness to close.
 
 The package's central security claims were verified and held up:
 
@@ -52,6 +56,10 @@ The package's central security claims were verified and held up:
 ## Findings
 
 ### 1. Low — `__proto__` keys in `details` are silently dropped
+
+✅ Resolved 2026-07-29 — `requireDetails` builds its copy with
+`Object.defineProperty` instead of plain assignment, so a key that names an
+inherited accessor is stored rather than swallowed by the setter.
 
 **File:** `packages/audit/src/index.ts` — `requireDetails` (lines 189-209),
 reached from both `auditEvent` (encode path) and `decodeDetails` (decode
@@ -96,6 +104,10 @@ regardless of name.
 
 ### 2. Low — `occurredAt` accepts non-ISO-8601 strings
 
+✅ Resolved 2026-07-29 — `requireTimestamp` now requires an ISO 8601 date-time
+shape (UTC designator or numeric offset) in addition to a parsable instant, so
+`March 3, 2020` and `2026-07-26` are refused.
+
 **File:** `packages/audit/src/index.ts` — `requireTimestamp` (lines 155-161).
 
 **Evidence.** Validation is `Number.isNaN(Date.parse(text))`. `Date.parse`
@@ -116,6 +128,10 @@ only compensated.
 `Date#toISOString`) in addition to `Date.parse`.
 
 ### 3. Low — `decodeAuditEvent` decodes malformed records into plausible events
+
+✅ Resolved 2026-07-29 — stored fields must be non-empty strings and the stored
+actor kind must be exactly `principal` or `system`; a malformed row now raises
+`AuditError` instead of being coerced with `String(...)`.
 
 **File:** `packages/audit/src/index.ts` — `decodeAuditEvent` (lines 283-301).
 
@@ -139,6 +155,10 @@ mislead an investigation — the exact scenario audit records feed.
 id fields with `AuditError` instead of coercing.
 
 ### 4. Low — Release validation requires `prepack` but does not forbid other lifecycle scripts
+
+✅ Resolved 2026-07-29 — `validateRepository` refuses a published manifest that
+defines `preinstall`, `install`, or `postinstall`, via a `findInstallTimeScript`
+helper with its own unit test.
 
 **File:** `scripts/release-packages.mjs` — `validateRepository`
 (lines 177-185).
@@ -165,6 +185,14 @@ script that runs at install time on consumers (`preinstall`, `install`,
 
 ### 5. Low — Windows fallback in `runNpm` uses `shell: true` with unescaped arguments
 
+✅ Resolved 2026-07-29 — the fallback is removed rather than quoted: `runNpm`
+requires `npm_execpath` (which every release entry point, being an npm script,
+always sets) and never builds a shell command line. Note that the alternative
+recommendation is not implementable — since the fix for CVE-2024-27980, Node
+refuses to spawn `npm.cmd` without `shell: true` (`EINVAL`), and Node now
+deprecates passing arguments alongside `shell: true` (DEP0190) for exactly the
+reason given here.
+
 **File:** `scripts/release-packages.mjs` — `runNpm` (lines 61-69), callers
 pass operator-supplied paths (`--root` → `packageDirectory`, `--output`,
 tarball paths).
@@ -186,6 +214,13 @@ via `execFileSync`-style spawn without `shell`, or drop the fallback and
 require `npm_execpath`.
 
 ### 6. Low — Release workflow installs `npm@11.18.0` without an integrity pin
+
+✅ Resolved 2026-07-29 — the workflow downloads the npm CLI tarball over HTTPS
+and verifies its `sha512` against `REVIEWED_NPM_INTEGRITY` in
+`scripts/release-packages.mjs` (`release-packages.mjs verify-npm`) before
+installing it, so a substituted tarball fails before it can build anything. A
+test asserts the workflow uses the reviewed constants and no longer installs the
+bare registry spec.
 
 **File:** `.github/workflows/publish.yml` line 57 (`npm install --global
 npm@11.18.0`); `scripts/release-packages.mjs` lines 21, 157-161, 403-415.
@@ -213,6 +248,10 @@ after install, or a corepack-style pinned installer).
 
 ### 7. Informational — `sweep` `limit` of `NaN` bypasses the guard
 
+✅ Resolved 2026-07-29 — `sweep` validates a supplied `limit` as a positive safe
+integer rather than by comparison, so `NaN` (and a fraction) is refused and the
+bound on a permanent deletion always holds.
+
 **File:** `packages/audit/src/index.ts` lines 493-496. `NaN <= 0` is `false`,
 so `limit: NaN` passes validation; `deleted >= NaN` is always `false`, so the
 limit never binds and one call sweeps the entire partition. Caller-supplied
@@ -221,6 +260,18 @@ one call, and a caller bug silently removes the bound. A
 `Number.isFinite`/`Number.isInteger` check would close it.
 
 ### 8. Informational — Smoke test installs sibling dependencies without a lockfile
+
+⚠️ Disputed 2026-07-29 — not a valid finding: the description is accurate but
+there is no weakness to close, and the report itself recommends no change. The
+prepare job holds no secrets and no OIDC token, `--ignore-scripts` blocks
+install-time hooks, and — checked against the code — `prepareRelease` hashes the
+tarball _before_ `smokeTestTarball` runs while `verifyPreparedManifest` re-hashes
+it in the publish job, so code executed during the smoke test cannot alter what
+is published without failing the release. A lockfile would also not add a
+guarantee: the sibling versions are already exact-pinned in
+`packages/audit/package.json`, and committing a second lockfile for a throwaway
+temporary project would duplicate that pin without narrowing the trust in the
+registry that `npm ci` already places one step earlier.
 
 **File:** `scripts/release-packages.mjs` — `smokeTestTarball` (lines 285-319).
 The temp project has no lockfile; `npm install <tarball>` resolves
@@ -233,6 +284,18 @@ awareness that the smoke test is a registry-trust point.
 
 ### 9. Informational — Unbounded in-memory reads and `details` size
 
+⚠️ Disputed 2026-07-29 — not a valid finding: neither quantity is
+attacker-amplified, and neither can be bounded here without breaking a stated
+design rule. `history` and `sweep` read one partition because storage-core's
+`list` is explicitly unordered with no server-side filter or pagination;
+bounding a read would require a secondary index, which is a second collection
+with its own atomicity problem — the one change `AGENTS.md` says the design
+cannot absorb. The partition name and the `details` contents are both chosen by
+the trusted caller, and `SECURITY.md` already assigns partition choice, read
+authorization, and `details` hygiene to the host. `AGENTS.md` documents
+one-partition-at-a-time reads as a known gap, so this is a design consequence
+already written down rather than an oversight.
+
 **File:** `packages/audit/src/index.ts` — `history` (lines 481-487) and
 `sweep` (lines 502-525) load an entire partition into memory; `details` has
 no size bound before `JSON.stringify` (line 260). Both are caller-controlled
@@ -242,6 +305,14 @@ partition makes each `history`/`sweep` call O(partition) in memory, and that
 oversized `details` bags are stored and returned whole to every reader.
 
 ### 10. Informational — Unbounded recursion in `exportTargets`
+
+⚠️ Disputed 2026-07-29 — not a valid finding: `exportTargets` only ever walks
+the `exports` object of `packages/audit/package.json`, a repository-controlled
+file authored by maintainers and reviewed before merge, so no untrusted input
+reaches it. A stack overflow would abort validation and fail the release closed,
+which is the direction a release check should fail. The report classifies this as
+a robustness note rather than a vulnerability, and adding a depth cap would add a
+branch guarding against a manifest nobody can supply.
 
 **File:** `scripts/release-packages.mjs` lines 82-88. A deeply nested
 `exports` object could overflow the stack during validation. The manifest is
@@ -285,3 +356,9 @@ repository-controlled and validated in CI, so this is a robustness note only.
 ## Test baseline
 
 `npm test` at scan time: 24/24 passing (Node 24.18.0).
+
+After the 2026-07-29 fixes: 30/30 passing (Node 24.18.0). The six added tests
+cover the `__proto__` detail key round trip, a timestamp only `Date.parse` would
+accept, a stored row that cannot be read faithfully, a `sweep` limit that would
+not bound the deletion, install-time lifecycle scripts, and the npm CLI
+integrity pin.

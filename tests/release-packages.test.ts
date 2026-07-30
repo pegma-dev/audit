@@ -5,10 +5,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
+  REVIEWED_NPM,
   decidePublication,
+  findInstallTimeScript,
   parseArguments,
   validateReleaseTag,
   validateRepository,
+  verifyReviewedNpmTarball,
 } from "../scripts/release-packages.mjs";
 
 const git = process.platform === "win32" ? "git.exe" : "git";
@@ -42,6 +45,39 @@ describe("release package metadata", () => {
 
   it("validates package manifests and the lockfile together", async () => {
     await expect(validateRepository()).resolves.toBeDefined();
+  });
+
+  it("refuses a script that would run on a consumer's install", async () => {
+    // `package.json` is always packed, so the `files` allowlist does not
+    // constrain these: one of them in the published manifest is arbitrary code
+    // execution on every downstream host.
+    expect(findInstallTimeScript({ prepack: "npm run build" })).toBeNull();
+    expect(findInstallTimeScript(undefined)).toBeNull();
+    expect(findInstallTimeScript({ preinstall: "node steal.js" })).toBe(
+      "preinstall",
+    );
+    expect(findInstallTimeScript({ install: "node steal.js" })).toBe("install");
+    expect(findInstallTimeScript({ postinstall: "node steal.js" })).toBe(
+      "postinstall",
+    );
+    // The released manifest itself has none.
+    const { manifest } = await validateRepository();
+    expect(findInstallTimeScript(manifest.scripts)).toBeNull();
+  });
+
+  it("pins the npm CLI that builds the release by integrity", () => {
+    expect(() =>
+      verifyReviewedNpmTarball(Buffer.from("not the npm CLI")),
+    ).toThrow("does not match the reviewed");
+    const workflow = readFileSync(
+      join(process.cwd(), ".github", "workflows", "publish.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain(`REVIEWED_NPM_VERSION: ${REVIEWED_NPM.version}`);
+    expect(workflow).toContain("verify-npm --tarball");
+    // Installing the registry spec directly would trust whatever bytes the
+    // registry serves for the tool that packs and publishes the release.
+    expect(workflow).not.toContain(`npm@${REVIEWED_NPM.version}`);
   });
 
   it("requires the release tag to match a public package version", async () => {

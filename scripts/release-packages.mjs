@@ -19,9 +19,35 @@ const PACKAGE = {
 };
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/audit.git";
 const REVIEWED_NPM_VERSION = "11.18.0";
+/**
+ * Subresource integrity of the reviewed npm CLI tarball.
+ *
+ * The CLI that packs and publishes the release is itself fetched from the
+ * registry at release time, so pinning only its version leaves the bytes to
+ * whatever the registry serves. Everything downstream is verified with
+ * metadata this same tool produced, which a trojaned CLI would produce
+ * consistently. Recorded from `npm view npm@11.18.0 dist.integrity`.
+ */
+const REVIEWED_NPM_INTEGRITY =
+  "sha512-T67M4L5wNm0cZ7EBLErcEkY1SmzEW/WJ+SADBzsFUY1UdAPfFHXFQtZ6SEXiK0+vzXysCvAsepbMaBTwnrAD+w==";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+/**
+ * Lifecycle scripts npm runs on a consumer's machine during `npm install`.
+ *
+ * `package.json` is always packed, so the `files` allowlist places no
+ * constraint on these: one of them in the published manifest is arbitrary code
+ * execution on every downstream host. Build-time hooks such as `prepack` run
+ * here instead, where they belong.
+ */
+const INSTALL_TIME_SCRIPTS = ["preinstall", "install", "postinstall"];
 
 export const RELEASE_PACKAGES = [PACKAGE];
+
+/** What the release workflow must install, so a test can hold it to this. */
+export const REVIEWED_NPM = {
+  version: REVIEWED_NPM_VERSION,
+  integrity: REVIEWED_NPM_INTEGRITY,
+};
 
 function fail(message) {
   throw new Error(message);
@@ -60,12 +86,19 @@ function run(command, arguments_, options = {}) {
 
 function runNpm(arguments_, options = {}) {
   const npmExecPath = process.env.npm_execpath;
-  return npmExecPath === undefined
-    ? run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
-        ...options,
-        shell: process.platform === "win32",
-      })
-    : run(process.execPath, [npmExecPath, ...arguments_], options);
+  if (npmExecPath === undefined) {
+    // The removed fallback reached `npm.cmd` through `cmd.exe`, which is the
+    // only way to spawn it on Windows, and a shell concatenates arguments
+    // without escaping them, so a path containing `&`, `%`, `^`, or a quote
+    // became part of the command line. Nothing here needs to build a command
+    // line: every release entry point is an npm script, and npm always sets
+    // this, so requiring it removes the shell instead of trying to quote for
+    // one.
+    fail(
+      "release commands must be run through npm (npm_execpath is not set); use npm run release:check, release:pack, or release:publish",
+    );
+  }
+  return run(process.execPath, [npmExecPath, ...arguments_], options);
 }
 
 function gitCommand() {
@@ -77,6 +110,28 @@ function hashTarball(bytes) {
     shasum: createHash("sha1").update(bytes).digest("hex"),
     integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
   };
+}
+
+/**
+ * Confirms a downloaded npm CLI tarball is the reviewed one, before it is
+ * installed and used to build the release.
+ */
+export function verifyReviewedNpmTarball(bytes) {
+  const { integrity } = hashTarball(bytes);
+  if (!safeEqual(integrity, REVIEWED_NPM_INTEGRITY)) {
+    fail(
+      `npm@${REVIEWED_NPM_VERSION} tarball integrity ${integrity} does not match the reviewed ${REVIEWED_NPM_INTEGRITY}`,
+    );
+  }
+  return integrity;
+}
+
+/** The install-time lifecycle script a manifest defines, or null. */
+export function findInstallTimeScript(scripts) {
+  if (scripts === null || typeof scripts !== "object") return null;
+  return (
+    INSTALL_TIME_SCRIPTS.find((name) => scripts[name] !== undefined) ?? null
+  );
 }
 
 function exportTargets(value) {
@@ -182,6 +237,12 @@ export async function validateRepository(options = {}) {
     !manifest.scripts.prepack.includes("build")
   ) {
     fail(`${PACKAGE.name} has an unsafe package allowlist or prepack`);
+  }
+  const installScript = findInstallTimeScript(manifest.scripts);
+  if (installScript !== null) {
+    fail(
+      `${PACKAGE.name} must not define the install-time script ${installScript}`,
+    );
   }
   const targets = exportTargets(manifest.exports);
   if (
@@ -542,9 +603,11 @@ export function parseArguments(arguments_) {
           ? "output"
           : argument === "--manifest"
             ? "manifest"
-            : argument === "--expected-release-commit"
-              ? "expectedReleaseCommit"
-              : null;
+            : argument === "--tarball"
+              ? "tarball"
+              : argument === "--expected-release-commit"
+                ? "expectedReleaseCommit"
+                : null;
     if (key === null || arguments_[index + 1] === undefined) {
       fail(`unknown or incomplete argument: ${argument}`);
     }
@@ -561,6 +624,14 @@ function defaultRoot() {
 async function main() {
   const [command, ...arguments_] = process.argv.slice(2);
   const options = parseArguments(arguments_);
+  if (command === "verify-npm") {
+    if (options.tarball === undefined) fail("--tarball is required");
+    verifyReviewedNpmTarball(await readFile(resolve(options.tarball)));
+    process.stdout.write(
+      `Verified the reviewed npm@${REVIEWED_NPM_VERSION} tarball.\n`,
+    );
+    return;
+  }
   if (command === "check") {
     await validateRepository(options);
     process.stdout.write("Release metadata is valid.\n");
@@ -575,7 +646,7 @@ async function main() {
     await publishPreparedRelease(options);
     return;
   }
-  fail("usage: release-packages.mjs <check|pack|publish> [options]");
+  fail("usage: release-packages.mjs <check|pack|publish|verify-npm> [options]");
 }
 
 const isMain =
