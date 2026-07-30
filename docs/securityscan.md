@@ -27,7 +27,9 @@ Findings were appended as they were discovered during the scan.
 | 10  | Informational | `exports` target recursion in release validation is unbounded                                  | ⚠️ Disputed |
 
 **No high, medium, or critical vulnerabilities were found.** `npm audit`
-reports zero known vulnerabilities across 103 dependencies. All 24 tests pass.
+reports zero known vulnerabilities across 103 dependencies. All 24 tests passed
+at scan time; the baseline after the 2026-07-29 fixes is 30/30, recorded under
+[Test baseline](#test-baseline).
 
 Every finding was re-examined against the code on 2026-07-29 and dispositioned
 below: seven were fixed, three were disputed. Each disputed item says why the
@@ -105,8 +107,10 @@ regardless of name.
 ### 2. Low — `occurredAt` accepts non-ISO-8601 strings
 
 ✅ Resolved 2026-07-29 — `requireTimestamp` now requires an ISO 8601 date-time
-shape (UTC designator or numeric offset) in addition to a parsable instant, so
-`March 3, 2020` and `2026-07-26` are refused.
+shape (UTC designator or numeric offset), a day-of-month that exists in its
+month, and a parsable instant, so `March 3, 2020`, `2026-07-26`, and
+`2026-02-30T00:00:00Z` (which `Date.parse` silently normalizes to March 2) are
+all refused.
 
 **File:** `packages/audit/src/index.ts` — `requireTimestamp` (lines 155-161).
 

@@ -158,16 +158,41 @@ function requireText(value: unknown, field: string): string {
  * `Date.parse` is not this check on its own: it also accepts
  * implementation-defined formats such as `March 3, 2020`, which would be kept
  * verbatim in a record nothing in this package can correct afterwards, and
- * which a consumer parsing strictly as ISO 8601 would reject. Both checks run,
- * so a value that is the right shape but not a real instant, such as
- * `2026-13-01T00:00:00Z`, is still refused.
+ * which a consumer parsing strictly as ISO 8601 would reject. The shape check,
+ * {@link isRealCalendarDate}, and `Date.parse` all run, so a value that is the
+ * right shape but not a real instant, such as `2026-13-01T00:00:00Z` or
+ * `2026-02-30T00:00:00Z`, is still refused.
  */
 const ISO_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * Whether the date part of an already shape-checked timestamp exists.
+ *
+ * The third check `Date.parse` cannot make: a day past the end of its month is
+ * normalized rather than refused, so `2026-02-30T00:00:00Z` parses as March 2
+ * and would be kept forever as a day nothing happened on. Every other
+ * out-of-range component — month `00`, hour `25`, minute `61`, an offset of
+ * `+25:00` — does make `Date.parse` return `NaN`, so only the day needs this.
+ */
+function isRealCalendarDate(text: string): boolean {
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
+  const leapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const days = month === 2 && leapYear ? 29 : DAYS_IN_MONTH[month - 1];
+  return days !== undefined && day <= days;
+}
+
 function requireTimestamp(value: unknown, field: string): IsoTimestamp {
   const text = requireText(value, field);
-  if (!ISO_TIMESTAMP.test(text) || Number.isNaN(Date.parse(text))) {
+  if (
+    !ISO_TIMESTAMP.test(text) ||
+    !isRealCalendarDate(text) ||
+    Number.isNaN(Date.parse(text))
+  ) {
     throw new AuditError(`${field} must be an ISO 8601 timestamp`);
   }
   return text;

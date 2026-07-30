@@ -143,6 +143,28 @@ describe("the event shape", () => {
     expect(() => event({ occurredAt: "2026-13-01T00:00:00Z" })).toThrow(
       /ISO 8601 timestamp/,
     );
+    // `Date.parse` normalizes a day past the end of its month instead of
+    // refusing it, so an impossible date would be kept forever as a day
+    // nothing happened on.
+    expect(Date.parse("2026-02-30T00:00:00Z")).not.toBeNaN();
+    expect(() => event({ occurredAt: "2026-02-30T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(() => event({ occurredAt: "2026-04-31T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(() => event({ occurredAt: "2100-02-29T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(event({ occurredAt: "2024-02-29T00:00:00Z" }).occurredAt).toBe(
+      "2024-02-29T00:00:00Z",
+    );
+    expect(event({ occurredAt: "2000-02-29T00:00:00Z" }).occurredAt).toBe(
+      "2000-02-29T00:00:00Z",
+    );
+    expect(event({ occurredAt: "2026-12-31T23:59:59.999Z" }).occurredAt).toBe(
+      "2026-12-31T23:59:59.999Z",
+    );
     expect(event({ occurredAt: "2026-07-26T12:00:00Z" }).occurredAt).toBe(
       "2026-07-26T12:00:00Z",
     );
