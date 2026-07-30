@@ -16,6 +16,7 @@ export interface ValidationOptions {
 export interface ReleaseCommandOptions extends ValidationOptions {
   readonly manifest?: string;
   readonly output?: string;
+  readonly tarball?: string;
 }
 
 export interface PublicPackageManifest {
@@ -32,6 +33,17 @@ export interface ValidationResult {
 }
 
 export const RELEASE_PACKAGES: readonly ReleasePackageDefinition[];
+
+export const REVIEWED_NPM: {
+  readonly version: string;
+  readonly integrity: string;
+};
+
+export function findInstallTimeScript(
+  scripts: unknown,
+): "preinstall" | "install" | "postinstall" | null;
+
+export function verifyReviewedNpmTarball(bytes: Uint8Array | string): string;
 
 export function parseArguments(
   arguments_: readonly string[],

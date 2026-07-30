@@ -1,6 +1,6 @@
 {
   "name": "@pegma/audit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Append-only audit records that commit in the caller's own transaction.",
   "license": "MIT",
   "type": "module",

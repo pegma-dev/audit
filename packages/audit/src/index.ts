@@ -152,9 +152,47 @@ function requireText(value: unknown, field: string): string {
   return value;
 }
 
+/**
+ * ISO 8601 calendar date and time, with a UTC designator or a numeric offset.
+ *
+ * `Date.parse` is not this check on its own: it also accepts
+ * implementation-defined formats such as `March 3, 2020`, which would be kept
+ * verbatim in a record nothing in this package can correct afterwards, and
+ * which a consumer parsing strictly as ISO 8601 would reject. The shape check,
+ * {@link isRealCalendarDate}, and `Date.parse` all run, so a value that is the
+ * right shape but not a real instant, such as `2026-13-01T00:00:00Z` or
+ * `2026-02-30T00:00:00Z`, is still refused.
+ */
+const ISO_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * Whether the date part of an already shape-checked timestamp exists.
+ *
+ * The third check `Date.parse` cannot make: a day past the end of its month is
+ * normalized rather than refused, so `2026-02-30T00:00:00Z` parses as March 2
+ * and would be kept forever as a day nothing happened on. Every other
+ * out-of-range component — month `00`, hour `25`, minute `61`, an offset of
+ * `+25:00` — does make `Date.parse` return `NaN`, so only the day needs this.
+ */
+function isRealCalendarDate(text: string): boolean {
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
+  const leapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const days = month === 2 && leapYear ? 29 : DAYS_IN_MONTH[month - 1];
+  return days !== undefined && day <= days;
+}
+
 function requireTimestamp(value: unknown, field: string): IsoTimestamp {
   const text = requireText(value, field);
-  if (Number.isNaN(Date.parse(text))) {
+  if (
+    !ISO_TIMESTAMP.test(text) ||
+    !isRealCalendarDate(text) ||
+    Number.isNaN(Date.parse(text))
+  ) {
     throw new AuditError(`${field} must be an ISO 8601 timestamp`);
   }
   return text;
@@ -203,7 +241,18 @@ function requireDetails(details: AuditDetails): AuditDetails {
     if (typeof value === "number" && !Number.isFinite(value)) {
       throw new AuditError(`details.${key} must be a finite number`);
     }
-    copied[key] = value;
+    // Not `copied[key] = value`: for a key that names an inherited accessor,
+    // notably `__proto__`, plain assignment calls the setter instead of
+    // storing the detail, so the key vanishes and the event round-trips as
+    // different bytes than were submitted. `JSON.parse` produces exactly that
+    // key as an own property, so the decode path reaches this too. Defining
+    // the property keeps every own key, whatever it is called.
+    Object.defineProperty(copied, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return Object.freeze(copied);
 }
@@ -279,22 +328,59 @@ function decodeDetails(value: unknown): AuditDetails | undefined {
   return requireDetails(parsed as AuditDetails);
 }
 
+/**
+ * Reads a stored field that {@link encodeAuditEvent} always writes as a string.
+ *
+ * Deliberately not `String(...)`: coercion turns a missing or null field into
+ * the strings `"undefined"` and `"null"`, which then pass the non-empty-string
+ * check and produce a plausible-looking event out of a corrupt row. An audit
+ * record is read to establish what happened, so failing is the only honest
+ * answer.
+ */
+function requireStoredText(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new AuditError(`stored audit ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function decodeActor(record: StoredRecord): AuditActor {
+  const kind = record[ACTOR_KIND_FIELD];
+  if (kind === "principal") {
+    return {
+      kind: "principal",
+      principalId: requireStoredText(
+        record[ACTOR_PRINCIPAL_FIELD],
+        "actor principal id",
+      ),
+    };
+  }
+  if (kind === "system") {
+    return {
+      kind: "system",
+      systemId: requireStoredText(
+        record[ACTOR_SYSTEM_FIELD],
+        "actor system id",
+      ),
+    };
+  }
+  // Anything else is a row this package did not write, or one that was
+  // changed underneath it. Treating an unrecognized kind as a principal
+  // invents an actor, which is the one thing an audit reader must not be
+  // handed.
+  throw new AuditError("stored audit actor kind must be principal or system");
+}
+
 /** Reads an event back out of a stored row written by {@link encodeAuditEvent}. */
 export function decodeAuditEvent(record: StoredRecord): AuditEvent {
   const sequence = record[SEQUENCE_FIELD];
   const details = decodeDetails(record[DETAILS_FIELD]);
   return auditEvent({
-    id: String(record[ID_FIELD]),
-    occurredAt: String(record[OCCURRED_AT_FIELD]),
-    actor:
-      record[ACTOR_KIND_FIELD] === "system"
-        ? { kind: "system", systemId: String(record[ACTOR_SYSTEM_FIELD]) }
-        : {
-            kind: "principal",
-            principalId: String(record[ACTOR_PRINCIPAL_FIELD]),
-          },
-    action: String(record[ACTION_FIELD]),
-    subject: String(record[SUBJECT_FIELD]),
+    id: requireStoredText(record[ID_FIELD], "id"),
+    occurredAt: requireStoredText(record[OCCURRED_AT_FIELD], "occurredAt"),
+    actor: decodeActor(record),
+    action: requireStoredText(record[ACTION_FIELD], "action"),
+    subject: requireStoredText(record[SUBJECT_FIELD], "subject"),
     ...(sequence == null ? {} : { sequence: Number(sequence) }),
     ...(details === undefined ? {} : { details }),
   });
@@ -346,7 +432,11 @@ export interface AuditSweepOptions {
   readonly before: IsoTimestamp;
   /** Sweep only events concerning this subject. */
   readonly subject?: string;
-  /** Stop after this many deletions, so one call has a bounded cost. */
+  /**
+   * Stop after this many deletions, so one call has a bounded cost.
+   *
+   * A positive safe integer. Omit it to sweep everything expired in one call.
+   */
   readonly limit?: number;
 }
 
@@ -490,10 +580,18 @@ export function defineAudit<TRecord>(
       const before = Date.parse(
         requireTimestamp(options.before, "options.before"),
       );
-      const limit = options.limit ?? Number.POSITIVE_INFINITY;
-      if (limit <= 0) {
-        throw new AuditError("options.limit must be a positive number");
+      // Validated as a count rather than by comparison: `NaN <= 0` is false,
+      // so a comparison guard passes `NaN` through, and `deleted >= NaN` is
+      // also false, so the limit would never bind and one call would delete
+      // the whole partition. `limit` is the only bound on a permanent
+      // deletion, and it has to hold against a caller's arithmetic mistake.
+      if (
+        options.limit !== undefined &&
+        (!Number.isSafeInteger(options.limit) || options.limit <= 0)
+      ) {
+        throw new AuditError("options.limit must be a positive safe integer");
       }
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
 
       let examined = 0;
       let deleted = 0;

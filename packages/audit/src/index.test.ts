@@ -7,6 +7,7 @@ import {
   decodeAuditEvent,
   defineAudit,
   encodeAuditEvent,
+  type AuditDetails,
   type AuditEvent,
 } from "./index.js";
 
@@ -126,6 +127,88 @@ describe("the event shape", () => {
     expect(() =>
       event({ details: { nested: {} as unknown as string } }),
     ).toThrow(/details.nested/);
+  });
+
+  it("rejects a timestamp only Date.parse would accept", () => {
+    // `Date.parse` accepts implementation-defined formats, so it cannot be the
+    // whole check: the value is kept forever exactly as it was submitted, and
+    // a consumer parsing strictly as ISO 8601 would reject it.
+    expect(Date.parse("March 3, 2020")).not.toBeNaN();
+    expect(() => event({ occurredAt: "March 3, 2020" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(() => event({ occurredAt: "2026-07-26" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(() => event({ occurredAt: "2026-13-01T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    // `Date.parse` normalizes a day past the end of its month instead of
+    // refusing it, so an impossible date would be kept forever as a day
+    // nothing happened on.
+    expect(Date.parse("2026-02-30T00:00:00Z")).not.toBeNaN();
+    expect(() => event({ occurredAt: "2026-02-30T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(() => event({ occurredAt: "2026-04-31T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(() => event({ occurredAt: "2100-02-29T00:00:00Z" })).toThrow(
+      /ISO 8601 timestamp/,
+    );
+    expect(event({ occurredAt: "2024-02-29T00:00:00Z" }).occurredAt).toBe(
+      "2024-02-29T00:00:00Z",
+    );
+    expect(event({ occurredAt: "2000-02-29T00:00:00Z" }).occurredAt).toBe(
+      "2000-02-29T00:00:00Z",
+    );
+    expect(event({ occurredAt: "2026-12-31T23:59:59.999Z" }).occurredAt).toBe(
+      "2026-12-31T23:59:59.999Z",
+    );
+    expect(event({ occurredAt: "2026-07-26T12:00:00Z" }).occurredAt).toBe(
+      "2026-07-26T12:00:00Z",
+    );
+    expect(event({ occurredAt: "2026-07-26T14:00:00+02:00" }).occurredAt).toBe(
+      "2026-07-26T14:00:00+02:00",
+    );
+  });
+
+  it("keeps a details key that names an inherited accessor", () => {
+    // `__proto__` is an own property when it arrives from `JSON.parse`, which
+    // is how a stored record comes back. Copying with plain assignment calls
+    // the inherited setter instead of storing it, so the key disappears and the
+    // event no longer round-trips as the bytes that were submitted.
+    const details = JSON.parse(
+      '{"__proto__":"inherited","safe":2}',
+    ) as AuditDetails;
+    const original = event({ details });
+
+    expect(Object.keys(original.details ?? {})).toEqual(["__proto__", "safe"]);
+    expect(
+      Object.keys(decodeAuditEvent(encodeAuditEvent(original)).details ?? {}),
+    ).toEqual(["__proto__", "safe"]);
+    // The transient copy never becomes anyone's prototype.
+    expect(Object.getPrototypeOf(original.details)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>)["safe"]).toBeUndefined();
+  });
+
+  it("refuses a stored row it cannot read faithfully", () => {
+    const stored = encodeAuditEvent(event());
+
+    // An unrecognized kind used to decode as a principal, inventing an actor.
+    expect(() =>
+      decodeAuditEvent({ ...stored, auditActorKind: "operator" }),
+    ).toThrow(/actor kind/);
+    // `String(null)` used to pass the non-empty-string check as `"null"`.
+    expect(() =>
+      decodeAuditEvent({ ...stored, auditActorPrincipalId: null }),
+    ).toThrow(/actor principal id/);
+    expect(() => decodeAuditEvent({ ...stored, auditSubject: null })).toThrow(
+      /stored audit subject/,
+    );
+    expect(() => decodeAuditEvent({ ...stored, auditEventId: 7 })).toThrow(
+      /stored audit id/,
+    );
   });
 });
 
@@ -370,5 +453,33 @@ describe("the retention sweep", () => {
     await expect(
       audit.sweep(collection, PARTITION, { before: "last week" }),
     ).rejects.toThrow(/ISO 8601 timestamp/);
+  });
+
+  it("rejects a limit that would not bound the deletion", async () => {
+    const collection = await seed(records());
+
+    // `NaN` passed a `<= 0` guard and then never bound against `deleted`, so
+    // a caller's arithmetic mistake swept the whole partition instead of one
+    // page of it. This is a permanent deletion, so it fails closed.
+    await expect(
+      audit.sweep(collection, PARTITION, {
+        before: "2026-06-01T00:00:00.000Z",
+        limit: Number.NaN,
+      }),
+    ).rejects.toThrow(/positive safe integer/);
+    await expect(
+      audit.sweep(collection, PARTITION, {
+        before: "2026-06-01T00:00:00.000Z",
+        limit: 1.5,
+      }),
+    ).rejects.toThrow(/positive safe integer/);
+    await expect(
+      audit.sweep(collection, PARTITION, {
+        before: "2026-06-01T00:00:00.000Z",
+        limit: 0,
+      }),
+    ).rejects.toThrow(/positive safe integer/);
+    // A refused sweep deleted nothing.
+    expect(await audit.history(collection, PARTITION)).toHaveLength(3);
   });
 });
