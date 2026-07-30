@@ -3,7 +3,8 @@
 ## Status
 
 **Stage:** Phase 1 complete; awaiting the first real consumer
-(`0.1.0` published, public API unstable)
+(`0.1.1` published, public API unstable; `0.2.0` is prepared, aligning
+`@pegma/storage-core` at `0.4.0` across the stack)
 
 **Initial reference application:** RetireGolden, through
 `@pegma/authorization-core` and the Pegma support desk

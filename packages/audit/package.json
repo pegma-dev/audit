@@ -1,6 +1,6 @@
 {
   "name": "@pegma/audit",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Append-only audit records that commit in the caller's own transaction.",
   "license": "MIT",
   "type": "module",
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@pegma/spine": "0.1.1",
-    "@pegma/storage-core": "0.3.0"
+    "@pegma/storage-core": "0.4.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
