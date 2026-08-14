@@ -96,16 +96,10 @@ function isNpmCliPath(execPath) {
   return base === "npm-cli.js" || base === "npm" || base === "npm.cmd";
 }
 
-function resolveNpmCli() {
-  const execPath = process.env.npm_execpath;
-  if (execPath !== undefined && isNpmCliPath(execPath)) {
-    return execPath;
-  }
-  // `pnpm run` sets npm_execpath to pnpm. Pack, publish, and registry
-  // lookups still use the reviewed npm CLI, resolved without a shell.
-  const bundled = [
+function npmCliBeside(nodeOrBinDirectory) {
+  return [
     join(
-      dirname(process.execPath),
+      nodeOrBinDirectory,
       "..",
       "lib",
       "node_modules",
@@ -113,15 +107,25 @@ function resolveNpmCli() {
       "bin",
       "npm-cli.js",
     ),
-    join(
-      dirname(process.execPath),
-      "node_modules",
-      "npm",
-      "bin",
-      "npm-cli.js",
-    ),
+    join(nodeOrBinDirectory, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeOrBinDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
   ];
-  for (const candidate of bundled) {
+}
+
+function resolveNpmCli() {
+  const execPath = process.env.npm_execpath;
+  if (execPath !== undefined && isNpmCliPath(execPath)) {
+    return execPath;
+  }
+  // `pnpm run` sets npm_execpath to pnpm. Pack, publish, and registry
+  // lookups still use the reviewed npm CLI, resolved without a shell.
+  const candidates = npmCliBeside(dirname(process.execPath));
+  const pathEnv = process.env.PATH ?? "";
+  const delimiter = process.platform === "win32" ? ";" : ":";
+  for (const directory of pathEnv.split(delimiter)) {
+    if (directory !== "") candidates.push(...npmCliBeside(directory));
+  }
+  for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
   fail(
