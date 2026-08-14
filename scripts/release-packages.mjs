@@ -307,19 +307,34 @@ function compareSemver(left, right) {
 }
 
 function lockResolvedVersion(version) {
-  return /^(\S+?)(?:\(|$)/u.exec(version)?.[1] ?? version;
+  const paren = version.indexOf("(");
+  return paren === -1 ? version : version.slice(0, paren);
+}
+
+function isRangeSpecifier(specifier) {
+  return (
+    specifier === "*" ||
+    specifier === "x" ||
+    specifier.startsWith("^") ||
+    specifier.startsWith("~") ||
+    /^(>=|>|<=|<|=)/u.test(specifier)
+  );
+}
+
+function isPrereleaseVersion(version) {
+  return /-(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)(?:\+|$)/u.test(version);
 }
 
 export function resolvedVersionSatisfies(resolved, specifier) {
   const version = lockResolvedVersion(resolved);
-  if (STABLE_SEMVER.test(specifier)) {
+  if (!isRangeSpecifier(specifier)) {
     return version === specifier;
   }
   if (specifier === "*" || specifier === "x") {
-    return parseSemver(version) !== null;
+    return parseSemver(version) !== null && !isPrereleaseVersion(version);
   }
   const parsed = parseSemver(version);
-  if (parsed === null) return false;
+  if (parsed === null || isPrereleaseVersion(version)) return false;
   const caret = /^\^((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$/u.exec(
     specifier,
   );
@@ -431,10 +446,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  assertPnpmLockfileSynchronized(lockfile, `packages/${PACKAGE.directory}`, {
-    ...(manifest.dependencies ?? {}),
-    ...(manifest.peerDependencies ?? {}),
-  });
+  assertPnpmLockfileSynchronized(
+    lockfile,
+    `packages/${PACKAGE.directory}`,
+    manifest.dependencies ?? {},
+  );
 
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {

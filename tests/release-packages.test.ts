@@ -12,6 +12,7 @@ import {
   findInstallTimeScript,
   parseArguments,
   resolveNpmCli,
+  resolvedVersionSatisfies,
   validateReleaseTag,
   validateRepository,
   verifyReviewedNpmTarball,
@@ -119,7 +120,6 @@ importers:
       b:
         specifier: '1.0.0'
         version: "1.0.0"
-    peerDependencies:
       left-pad:
         specifier: ^1.2.0
         version: 1.2.3
@@ -163,6 +163,21 @@ importers:
         "left-pad": "^1.2.0",
       }),
     ).toThrow("left-pad@^1.2.0");
+  });
+
+  it("treats prerelease specifiers as exact pins", () => {
+    expect(resolvedVersionSatisfies("1.0.0-rc.1", "1.0.0-rc.1")).toBe(true);
+    expect(
+      resolvedVersionSatisfies("1.0.0-rc.1(@pegma/spine@0.1.1)", "1.0.0-rc.1"),
+    ).toBe(true);
+    expect(resolvedVersionSatisfies("1.0.0", "1.0.0-rc.1")).toBe(false);
+    expect(resolvedVersionSatisfies("1.0.0-rc.1", "1.0.0")).toBe(false);
+    expect(resolvedVersionSatisfies("1.0.0-rc.1", "^1.0.0")).toBe(false);
+    expect(resolvedVersionSatisfies("0.2.9", "^0.2.3")).toBe(true);
+    expect(resolvedVersionSatisfies("0.3.0", "^0.2.3")).toBe(false);
+    expect(resolvedVersionSatisfies("0.2.2", "^0.2.3")).toBe(false);
+    expect(resolvedVersionSatisfies("0.0.3", "^0.0.3")).toBe(true);
+    expect(resolvedVersionSatisfies("0.0.4", "^0.0.3")).toBe(false);
   });
 
   it("requires the release tag to match a public package version", async () => {
