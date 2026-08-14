@@ -92,8 +92,10 @@ function run(command, arguments_, options = {}) {
 }
 
 function isNpmCliPath(execPath) {
-  const base = basename(execPath).toLowerCase();
-  return base === "npm-cli.js" || base === "npm" || base === "npm.cmd";
+  // `pnpm run` sets npm_execpath to .../pnpm.cjs. Never treat that, or an
+  // npm-cli.js nested under a pnpm install, as the reviewed npm CLI.
+  if (/pnpm/i.test(execPath)) return false;
+  return basename(execPath).toLowerCase() === "npm-cli.js";
 }
 
 function npmCliBeside(nodeOrBinDirectory) {
@@ -112,7 +114,7 @@ function npmCliBeside(nodeOrBinDirectory) {
   ];
 }
 
-function resolveNpmCli() {
+export function resolveNpmCli() {
   const execPath = process.env.npm_execpath;
   if (execPath !== undefined && isNpmCliPath(execPath)) {
     return execPath;
@@ -247,16 +249,70 @@ export function validateReleaseTag(options = {}) {
   return { headCommit, releaseTag };
 }
 
+export function lockfileImporterBlock(lockfile, importer) {
+  const heading = `  ${importer}:`;
+  const lines = lockfile.split("\n");
+  const start = lines.findIndex((line) => line === heading);
+  if (start === -1) return null;
+  const block = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^  \S/u.test(line) || /^[^\s]/u.test(line)) break;
+    block.push(line);
+  }
+  return block.join("\n");
+}
+
+export function parseImporterDependencyPins(block) {
+  const pins = {};
+  const pattern =
+    /^ {6}('[^']+'|[A-Za-z0-9@/._-]+):\n {8}specifier: (\S+)\n {8}version: (\S+)$/gmu;
+  for (const match of block.matchAll(pattern)) {
+    let name = match[1];
+    if (name.startsWith("'") && name.endsWith("'")) {
+      name = name.slice(1, -1);
+    }
+    pins[name] = { specifier: match[2], version: match[3] };
+  }
+  return pins;
+}
+
+function resolvedVersionMatchesPin(resolved, pin) {
+  return resolved === pin || resolved.startsWith(`${pin}(`);
+}
+
+export function assertPnpmLockfileSynchronized(
+  lockfile,
+  importer,
+  dependencies,
+) {
+  if (!/^lockfileVersion:/u.test(lockfile)) {
+    fail("pnpm-lock.yaml is missing lockfileVersion");
+  }
+  const block = lockfileImporterBlock(lockfile, importer);
+  if (block === null) {
+    fail(`${importer} is missing from pnpm-lock.yaml`);
+  }
+  const pins = parseImporterDependencyPins(block);
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    const entry = pins[name];
+    if (
+      entry === undefined ||
+      entry.specifier !== specifier ||
+      !resolvedVersionMatchesPin(entry.version, specifier)
+    ) {
+      fail(
+        `${name}@${specifier} is not synchronized with its own pnpm-lock.yaml entry`,
+      );
+    }
+  }
+}
+
 export async function validateRepository(options = {}) {
   const root = resolve(options.root ?? defaultRoot());
   const rootManifest = await readJson(join(root, "package.json"));
   const packageDirectory = join(root, "packages", PACKAGE.directory);
   const manifest = await readJson(join(packageDirectory, "package.json"));
   const lockfile = await readFile(join(root, "pnpm-lock.yaml"), "utf8");
-  const lockImporter = new RegExp(
-    `^ {2}packages/${PACKAGE.directory}:\\s*$`,
-    "m",
-  );
 
   if (
     rootManifest.private !== true ||
@@ -307,9 +363,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  if (!lockImporter.test(lockfile)) {
-    fail(`${PACKAGE.name} is missing from pnpm-lock.yaml`);
-  }
+  assertPnpmLockfileSynchronized(
+    lockfile,
+    `packages/${PACKAGE.directory}`,
+    manifest.dependencies ?? {},
+  );
 
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {

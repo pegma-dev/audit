@@ -7,9 +7,11 @@ import {
   RELEASE_PACKAGES,
   REVIEWED_NPM,
   REVIEWED_PNPM,
+  assertPnpmLockfileSynchronized,
   decidePublication,
   findInstallTimeScript,
   parseArguments,
+  resolveNpmCli,
   validateReleaseTag,
   validateRepository,
   verifyReviewedNpmTarball,
@@ -83,6 +85,60 @@ describe("release package metadata", () => {
     // Installing the registry spec directly would trust whatever bytes the
     // registry serves for the tool that packs and publishes the release.
     expect(workflow).not.toContain(`npm@${REVIEWED_NPM.version}`);
+  });
+
+  it("never treats pnpm as the npm CLI", () => {
+    const previous = process.env.npm_execpath;
+    process.env.npm_execpath = "/tmp/corepack/v1/pnpm/10.34.5/bin/pnpm.cjs";
+    try {
+      const cli = resolveNpmCli();
+      expect(cli).toMatch(/npm-cli\.js$/u);
+      expect(cli).not.toMatch(/pnpm/iu);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.npm_execpath;
+      } else {
+        process.env.npm_execpath = previous;
+      }
+    }
+  });
+
+  it("matches each lockfile dependency to its own specifier and version", () => {
+    const lockfile = `lockfileVersion: '9.0'
+
+importers:
+
+  packages/audit:
+    dependencies:
+      '@pegma/spine':
+        specifier: 0.1.1
+        version: 0.1.1
+      '@pegma/storage-core':
+        specifier: 0.4.0
+        version: 0.4.0
+`;
+    expect(() =>
+      assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
+        "@pegma/spine": "0.1.1",
+        "@pegma/storage-core": "0.4.0",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
+        "@pegma/spine": "0.4.0",
+        "@pegma/storage-core": "0.4.0",
+      }),
+    ).toThrow("@pegma/spine@0.4.0");
+    const swappedVersion = lockfile.replace(
+      "        version: 0.1.1",
+      "        version: 999.0.0",
+    );
+    expect(() =>
+      assertPnpmLockfileSynchronized(swappedVersion, "packages/audit", {
+        "@pegma/spine": "0.1.1",
+        "@pegma/storage-core": "0.4.0",
+      }),
+    ).toThrow("@pegma/spine@0.1.1");
   });
 
   it("requires the release tag to match a public package version", async () => {
@@ -197,8 +253,9 @@ describe("release source authentication", () => {
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
-    expect(publish).not.toContain("pnpm install");
-    expect(publish).toContain("pnpm run release:publish");
+    expect(publish).not.toContain("pnpm");
+    expect(publish).not.toContain("corepack");
+    expect(publish).toContain("node scripts/release-packages.mjs publish");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
   });

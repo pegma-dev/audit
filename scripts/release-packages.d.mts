@@ -43,6 +43,26 @@ export const REVIEWED_NPM: {
   readonly integrity: string;
 };
 
+export function resolveNpmCli(): string;
+
+export function lockfileImporterBlock(
+  lockfile: string,
+  importer: string,
+): string | null;
+
+export function parseImporterDependencyPins(block: string): {
+  readonly [name: string]: {
+    readonly specifier: string;
+    readonly version: string;
+  };
+};
+
+export function assertPnpmLockfileSynchronized(
+  lockfile: string,
+  importer: string,
+  dependencies: { readonly [name: string]: string },
+): void;
+
 export function findInstallTimeScript(
   scripts: unknown,
 ): "preinstall" | "install" | "postinstall" | null;
