@@ -169,13 +169,15 @@ cannot be part of your transaction.
 
 ## Development
 
-Audit requires Node.js 22 or newer.
+Audit requires Node.js 22 or newer. Enable Corepack so the pinned pnpm is
+used.
 
 ```sh
-npm ci
-npm run format:check
-npm run check
-npm test
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run format:check
+pnpm run check
+pnpm test
 ```
 
 Maintainer releases use npm trusted publishing and the signed-tag procedure in

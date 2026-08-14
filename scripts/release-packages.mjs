@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -18,6 +19,7 @@ const PACKAGE = {
   name: "@pegma/audit",
 };
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/audit.git";
+const REVIEWED_PNPM_VERSION = "10.34.5";
 const REVIEWED_NPM_VERSION = "11.18.0";
 /**
  * Subresource integrity of the reviewed npm CLI tarball.
@@ -42,6 +44,11 @@ const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const INSTALL_TIME_SCRIPTS = ["preinstall", "install", "postinstall"];
 
 export const RELEASE_PACKAGES = [PACKAGE];
+
+/** Workspace package manager pinned in package.json via Corepack. */
+export const REVIEWED_PNPM = {
+  version: REVIEWED_PNPM_VERSION,
+};
 
 /** What the release workflow must install, so a test can hold it to this. */
 export const REVIEWED_NPM = {
@@ -84,21 +91,56 @@ function run(command, arguments_, options = {}) {
   return result;
 }
 
-function runNpm(arguments_, options = {}) {
-  const npmExecPath = process.env.npm_execpath;
-  if (npmExecPath === undefined) {
-    // The removed fallback reached `npm.cmd` through `cmd.exe`, which is the
-    // only way to spawn it on Windows, and a shell concatenates arguments
-    // without escaping them, so a path containing `&`, `%`, `^`, or a quote
-    // became part of the command line. Nothing here needs to build a command
-    // line: every release entry point is an npm script, and npm always sets
-    // this, so requiring it removes the shell instead of trying to quote for
-    // one.
+function isNpmCliPath(execPath) {
+  const base = basename(execPath).toLowerCase();
+  return base === "npm-cli.js" || base === "npm" || base === "npm.cmd";
+}
+
+function resolveNpmCli() {
+  const execPath = process.env.npm_execpath;
+  if (execPath !== undefined && isNpmCliPath(execPath)) {
+    return execPath;
+  }
+  // `pnpm run` sets npm_execpath to pnpm. Pack, publish, and registry
+  // lookups still use the reviewed npm CLI, resolved without a shell.
+  const bundled = [
+    join(
+      dirname(process.execPath),
+      "..",
+      "lib",
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    ),
+    join(
+      dirname(process.execPath),
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    ),
+  ];
+  for (const candidate of bundled) {
+    if (existsSync(candidate)) return candidate;
+  }
+  fail(
+    "could not resolve the npm CLI used to pack and publish; Node's bundled npm is required",
+  );
+}
+
+function runWorkspace(arguments_, options = {}) {
+  const execPath = process.env.npm_execpath;
+  if (execPath === undefined) {
     fail(
-      "release commands must be run through npm (npm_execpath is not set); use npm run release:check, release:pack, or release:publish",
+      "release commands must be run through a package manager script (npm_execpath is not set); use pnpm run release:check, release:pack, or release:publish",
     );
   }
-  return run(process.execPath, [npmExecPath, ...arguments_], options);
+  return run(process.execPath, [execPath, ...arguments_], options);
+}
+
+function runNpm(arguments_, options = {}) {
+  return run(process.execPath, [resolveNpmCli(), ...arguments_], options);
 }
 
 function gitCommand() {
@@ -206,14 +248,17 @@ export async function validateRepository(options = {}) {
   const rootManifest = await readJson(join(root, "package.json"));
   const packageDirectory = join(root, "packages", PACKAGE.directory);
   const manifest = await readJson(join(packageDirectory, "package.json"));
-  const lockfile = await readJson(join(root, "package-lock.json"));
-  const lockEntry = lockfile.packages?.[`packages/${PACKAGE.directory}`];
+  const lockfile = await readFile(join(root, "pnpm-lock.yaml"), "utf8");
+  const lockImporter = new RegExp(
+    `^ {2}packages/${PACKAGE.directory}:\\s*$`,
+    "m",
+  );
 
   if (
     rootManifest.private !== true ||
-    rootManifest.packageManager !== `npm@${REVIEWED_NPM_VERSION}`
+    rootManifest.packageManager !== `pnpm@${REVIEWED_PNPM_VERSION}`
   ) {
-    fail(`the private root must pin npm@${REVIEWED_NPM_VERSION}`);
+    fail(`the private root must pin pnpm@${REVIEWED_PNPM_VERSION}`);
   }
   if (
     manifest.name !== PACKAGE.name ||
@@ -258,8 +303,8 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  if (lockEntry?.version !== manifest.version) {
-    fail(`${PACKAGE.name} version is not synchronized with package-lock.json`);
+  if (!lockImporter.test(lockfile)) {
+    fail(`${PACKAGE.name} is missing from pnpm-lock.yaml`);
   }
 
   const publicWorkspaces = [];
@@ -392,7 +437,7 @@ export async function prepareRelease(options = {}) {
     fail(`release output directory must be empty: ${output}`);
   }
 
-  runNpm(["run", "build"], { cwd: root });
+  runWorkspace(["run", "build"], { cwd: root });
   const result = runNpm(
     ["pack", packageDirectory, "--json", "--pack-destination", output],
     { cwd: root, capture: true },

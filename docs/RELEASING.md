@@ -41,8 +41,9 @@ The release workflow verifies that the tag:
 - points to the checkout and the GitHub release-event commit; and
 - is contained in `origin/main`.
 
-Its preparation job has no OIDC permission. It installs the reviewed npm
-version without dependency caching, runs the full gate, builds and packs once,
+Its preparation job has no OIDC permission. It installs dependencies with
+the pinned pnpm, installs the reviewed npm version without dependency
+caching, runs the full gate, builds and packs once,
 smoke-tests the tarball from a clean consumer, records its SHA-1 and SHA-512
 integrity, and uploads the exact prepared artifact.
 

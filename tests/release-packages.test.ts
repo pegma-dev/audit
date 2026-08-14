@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
   REVIEWED_NPM,
+  REVIEWED_PNPM,
   decidePublication,
   findInstallTimeScript,
   parseArguments,
@@ -45,6 +46,10 @@ describe("release package metadata", () => {
 
   it("validates package manifests and the lockfile together", async () => {
     await expect(validateRepository()).resolves.toBeDefined();
+    const rootManifest = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf8"),
+    ) as { packageManager: string };
+    expect(rootManifest.packageManager).toBe(`pnpm@${REVIEWED_PNPM.version}`);
   });
 
   it("refuses a script that would run on a consumer's install", async () => {
@@ -192,7 +197,8 @@ describe("release source authentication", () => {
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
-    expect(publish).toContain("npm run release:publish");
+    expect(publish).not.toContain("pnpm install");
+    expect(publish).toContain("pnpm run release:publish");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
   });
