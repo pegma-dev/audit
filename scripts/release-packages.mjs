@@ -262,22 +262,90 @@ export function lockfileImporterBlock(lockfile, importer) {
   return block.join("\n");
 }
 
+export function unquoteYamlScalar(raw) {
+  if (
+    raw.length >= 2 &&
+    ((raw.startsWith("'") && raw.endsWith("'")) ||
+      (raw.startsWith('"') && raw.endsWith('"')))
+  ) {
+    return raw.slice(1, -1);
+  }
+  return raw;
+}
+
 export function parseImporterDependencyPins(block) {
   const pins = {};
   const pattern =
-    /^ {6}('[^']+'|[A-Za-z0-9@/._-]+):\n {8}specifier: (\S+)\n {8}version: (\S+)$/gmu;
+    /^ {6}('[^']+'|"[^"]+"|[A-Za-z0-9@/._-]+):\n {8}specifier: (\S+)\n {8}version: (\S+)$/gmu;
   for (const match of block.matchAll(pattern)) {
-    let name = match[1];
-    if (name.startsWith("'") && name.endsWith("'")) {
-      name = name.slice(1, -1);
-    }
-    pins[name] = { specifier: match[2], version: match[3] };
+    pins[unquoteYamlScalar(match[1])] = {
+      specifier: unquoteYamlScalar(match[2]),
+      version: unquoteYamlScalar(match[3]),
+    };
   }
   return pins;
 }
 
-function resolvedVersionMatchesPin(resolved, pin) {
-  return resolved === pin || resolved.startsWith(`${pin}(`);
+function parseSemver(text) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+].*)?$/u.exec(
+    text,
+  );
+  if (match === null) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+function compareSemver(left, right) {
+  return (
+    left.major - right.major ||
+    left.minor - right.minor ||
+    left.patch - right.patch
+  );
+}
+
+function lockResolvedVersion(version) {
+  return /^(\S+?)(?:\(|$)/u.exec(version)?.[1] ?? version;
+}
+
+export function resolvedVersionSatisfies(resolved, specifier) {
+  const version = lockResolvedVersion(resolved);
+  if (STABLE_SEMVER.test(specifier)) {
+    return version === specifier;
+  }
+  if (specifier === "*" || specifier === "x") {
+    return parseSemver(version) !== null;
+  }
+  const parsed = parseSemver(version);
+  if (parsed === null) return false;
+  const caret = /^\^((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$/u.exec(
+    specifier,
+  );
+  if (caret !== null) {
+    const base = parseSemver(caret[1]);
+    if (base === null || compareSemver(parsed, base) < 0) return false;
+    if (base.major > 0) return parsed.major === base.major;
+    if (base.minor > 0)
+      return parsed.major === 0 && parsed.minor === base.minor;
+    return (
+      parsed.major === 0 && parsed.minor === 0 && parsed.patch === base.patch
+    );
+  }
+  const tilde = /^~((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$/u.exec(
+    specifier,
+  );
+  if (tilde !== null) {
+    const base = parseSemver(tilde[1]);
+    return (
+      base !== null &&
+      compareSemver(parsed, base) >= 0 &&
+      parsed.major === base.major &&
+      parsed.minor === base.minor
+    );
+  }
+  return false;
 }
 
 export function assertPnpmLockfileSynchronized(
@@ -298,7 +366,7 @@ export function assertPnpmLockfileSynchronized(
     if (
       entry === undefined ||
       entry.specifier !== specifier ||
-      !resolvedVersionMatchesPin(entry.version, specifier)
+      !resolvedVersionSatisfies(entry.version, specifier)
     ) {
       fail(
         `${name}@${specifier} is not synchronized with its own pnpm-lock.yaml entry`,
@@ -363,11 +431,10 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  assertPnpmLockfileSynchronized(
-    lockfile,
-    `packages/${PACKAGE.directory}`,
-    manifest.dependencies ?? {},
-  );
+  assertPnpmLockfileSynchronized(lockfile, `packages/${PACKAGE.directory}`, {
+    ...(manifest.dependencies ?? {}),
+    ...(manifest.peerDependencies ?? {}),
+  });
 
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {

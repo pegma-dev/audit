@@ -50,12 +50,19 @@ export function lockfileImporterBlock(
   importer: string,
 ): string | null;
 
+export function unquoteYamlScalar(raw: string): string;
+
 export function parseImporterDependencyPins(block: string): {
   readonly [name: string]: {
     readonly specifier: string;
     readonly version: string;
   };
 };
+
+export function resolvedVersionSatisfies(
+  resolved: string,
+  specifier: string,
+): boolean;
 
 export function assertPnpmLockfileSynchronized(
   lockfile: string,

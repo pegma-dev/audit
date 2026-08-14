@@ -116,11 +116,20 @@ importers:
       '@pegma/storage-core':
         specifier: 0.4.0
         version: 0.4.0
+      b:
+        specifier: '1.0.0'
+        version: "1.0.0"
+    peerDependencies:
+      left-pad:
+        specifier: ^1.2.0
+        version: 1.2.3
 `;
     expect(() =>
       assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
         "@pegma/spine": "0.1.1",
         "@pegma/storage-core": "0.4.0",
+        b: "1.0.0",
+        "left-pad": "^1.2.0",
       }),
     ).not.toThrow();
     expect(() =>
@@ -139,6 +148,21 @@ importers:
         "@pegma/storage-core": "0.4.0",
       }),
     ).toThrow("@pegma/spine@0.1.1");
+    expect(() =>
+      assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
+        "left-pad": "^1.2.0",
+        extra: "^2.0.0",
+      }),
+    ).toThrow("extra@^2.0.0");
+    const wrongMajor = lockfile.replace(
+      "        version: 1.2.3",
+      "        version: 2.0.0",
+    );
+    expect(() =>
+      assertPnpmLockfileSynchronized(wrongMajor, "packages/audit", {
+        "left-pad": "^1.2.0",
+      }),
+    ).toThrow("left-pad@^1.2.0");
   });
 
   it("requires the release tag to match a public package version", async () => {
