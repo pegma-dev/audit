@@ -83,7 +83,7 @@ CI resolve a version nobody tested against.
 ## Workflow
 
 Work on a `claude/*` branch and open a pull request. The gate is
-`npm run format:check`, `npm run check`, `npm test` — all three, on Node 22 and 24. Tests run against `createMemoryStore()` from `@pegma/storage-core`, which
+`pnpm run format:check`, `pnpm run check`, `pnpm test` — all three, on Node 22 and 24. Tests run against `createMemoryStore()` from `@pegma/storage-core`, which
 enforces the same transaction and concurrency rules a real backend does, so a
 behaviour proved there holds in production.
 

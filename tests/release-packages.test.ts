@@ -6,9 +6,13 @@ import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
   REVIEWED_NPM,
+  REVIEWED_PNPM,
+  assertPnpmLockfileSynchronized,
   decidePublication,
   findInstallTimeScript,
   parseArguments,
+  resolveNpmCli,
+  resolvedVersionSatisfies,
   validateReleaseTag,
   validateRepository,
   verifyReviewedNpmTarball,
@@ -45,6 +49,10 @@ describe("release package metadata", () => {
 
   it("validates package manifests and the lockfile together", async () => {
     await expect(validateRepository()).resolves.toBeDefined();
+    const rootManifest = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf8"),
+    ) as { packageManager: string };
+    expect(rootManifest.packageManager).toBe(`pnpm@${REVIEWED_PNPM.version}`);
   });
 
   it("refuses a script that would run on a consumer's install", async () => {
@@ -78,6 +86,98 @@ describe("release package metadata", () => {
     // Installing the registry spec directly would trust whatever bytes the
     // registry serves for the tool that packs and publishes the release.
     expect(workflow).not.toContain(`npm@${REVIEWED_NPM.version}`);
+  });
+
+  it("never treats pnpm as the npm CLI", () => {
+    const previous = process.env.npm_execpath;
+    process.env.npm_execpath = "/tmp/corepack/v1/pnpm/10.34.5/bin/pnpm.cjs";
+    try {
+      const cli = resolveNpmCli();
+      expect(cli).toMatch(/npm-cli\.js$/u);
+      expect(cli).not.toMatch(/pnpm/iu);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.npm_execpath;
+      } else {
+        process.env.npm_execpath = previous;
+      }
+    }
+  });
+
+  it("matches each lockfile dependency to its own specifier and version", () => {
+    const lockfile = `lockfileVersion: '9.0'
+
+importers:
+
+  packages/audit:
+    dependencies:
+      '@pegma/spine':
+        specifier: 0.1.1
+        version: 0.1.1
+      '@pegma/storage-core':
+        specifier: 0.4.0
+        version: 0.4.0
+      b:
+        specifier: '1.0.0'
+        version: "1.0.0"
+      left-pad:
+        specifier: ^1.2.0
+        version: 1.2.3
+`;
+    expect(() =>
+      assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
+        "@pegma/spine": "0.1.1",
+        "@pegma/storage-core": "0.4.0",
+        b: "1.0.0",
+        "left-pad": "^1.2.0",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
+        "@pegma/spine": "0.4.0",
+        "@pegma/storage-core": "0.4.0",
+      }),
+    ).toThrow("@pegma/spine@0.4.0");
+    const swappedVersion = lockfile.replace(
+      "        version: 0.1.1",
+      "        version: 999.0.0",
+    );
+    expect(() =>
+      assertPnpmLockfileSynchronized(swappedVersion, "packages/audit", {
+        "@pegma/spine": "0.1.1",
+        "@pegma/storage-core": "0.4.0",
+      }),
+    ).toThrow("@pegma/spine@0.1.1");
+    expect(() =>
+      assertPnpmLockfileSynchronized(lockfile, "packages/audit", {
+        "left-pad": "^1.2.0",
+        extra: "^2.0.0",
+      }),
+    ).toThrow("extra@^2.0.0");
+    const wrongMajor = lockfile.replace(
+      "        version: 1.2.3",
+      "        version: 2.0.0",
+    );
+    expect(() =>
+      assertPnpmLockfileSynchronized(wrongMajor, "packages/audit", {
+        "left-pad": "^1.2.0",
+      }),
+    ).toThrow("left-pad@^1.2.0");
+  });
+
+  it("treats prerelease specifiers as exact pins", () => {
+    expect(resolvedVersionSatisfies("1.0.0-rc.1", "1.0.0-rc.1")).toBe(true);
+    expect(
+      resolvedVersionSatisfies("1.0.0-rc.1(@pegma/spine@0.1.1)", "1.0.0-rc.1"),
+    ).toBe(true);
+    expect(resolvedVersionSatisfies("1.0.0", "1.0.0-rc.1")).toBe(false);
+    expect(resolvedVersionSatisfies("1.0.0-rc.1", "1.0.0")).toBe(false);
+    expect(resolvedVersionSatisfies("1.0.0-rc.1", "^1.0.0")).toBe(false);
+    expect(resolvedVersionSatisfies("0.2.9", "^0.2.3")).toBe(true);
+    expect(resolvedVersionSatisfies("0.3.0", "^0.2.3")).toBe(false);
+    expect(resolvedVersionSatisfies("0.2.2", "^0.2.3")).toBe(false);
+    expect(resolvedVersionSatisfies("0.0.3", "^0.0.3")).toBe(true);
+    expect(resolvedVersionSatisfies("0.0.4", "^0.0.3")).toBe(false);
   });
 
   it("requires the release tag to match a public package version", async () => {
@@ -192,7 +292,9 @@ describe("release source authentication", () => {
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
-    expect(publish).toContain("npm run release:publish");
+    expect(publish).not.toContain("pnpm");
+    expect(publish).not.toContain("corepack");
+    expect(publish).toContain("node scripts/release-packages.mjs publish");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
   });

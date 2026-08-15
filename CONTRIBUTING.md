@@ -14,13 +14,16 @@ Thank you for helping improve Audit.
 
 ## Local development
 
-Audit requires Node.js 22 or newer.
+Audit requires Node.js 22 or 24. Node 25 and newer do not bundle Corepack,
+so install it before enabling the pinned pnpm.
 
 ```sh
-npm ci
-npm run check
-npm test
-npm run format:check
+npm install -g corepack
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm test
+pnpm run format:check
 ```
 
 ## Pull requests

@@ -41,13 +41,15 @@ The release workflow verifies that the tag:
 - points to the checkout and the GitHub release-event commit; and
 - is contained in `origin/main`.
 
-Its preparation job has no OIDC permission. It installs the reviewed npm
-version without dependency caching, runs the full gate, builds and packs once,
+Its preparation job has no OIDC permission. It installs dependencies with
+the pinned pnpm, installs the reviewed npm version without dependency
+caching, runs the full gate, builds and packs once,
 smoke-tests the tarball from a clean consumer, records its SHA-1 and SHA-512
 integrity, and uploads the exact prepared artifact.
 
 Only the `npm-publish` job receives `id-token: write`. It installs no
-dependencies, verifies the prepared manifest and tarball hashes against the
+dependencies and does not download pnpm. It invokes the publish helper with
+`node`, verifies the prepared manifest and tarball hashes against the
 release commit, and publishes that tarball with npm provenance.
 
 ## Safe retry

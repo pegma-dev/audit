@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -18,6 +19,7 @@ const PACKAGE = {
   name: "@pegma/audit",
 };
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/audit.git";
+const REVIEWED_PNPM_VERSION = "10.34.5";
 const REVIEWED_NPM_VERSION = "11.18.0";
 /**
  * Subresource integrity of the reviewed npm CLI tarball.
@@ -42,6 +44,11 @@ const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const INSTALL_TIME_SCRIPTS = ["preinstall", "install", "postinstall"];
 
 export const RELEASE_PACKAGES = [PACKAGE];
+
+/** Workspace package manager pinned in package.json via Corepack. */
+export const REVIEWED_PNPM = {
+  version: REVIEWED_PNPM_VERSION,
+};
 
 /** What the release workflow must install, so a test can hold it to this. */
 export const REVIEWED_NPM = {
@@ -84,21 +91,62 @@ function run(command, arguments_, options = {}) {
   return result;
 }
 
-function runNpm(arguments_, options = {}) {
-  const npmExecPath = process.env.npm_execpath;
-  if (npmExecPath === undefined) {
-    // The removed fallback reached `npm.cmd` through `cmd.exe`, which is the
-    // only way to spawn it on Windows, and a shell concatenates arguments
-    // without escaping them, so a path containing `&`, `%`, `^`, or a quote
-    // became part of the command line. Nothing here needs to build a command
-    // line: every release entry point is an npm script, and npm always sets
-    // this, so requiring it removes the shell instead of trying to quote for
-    // one.
+function isNpmCliPath(execPath) {
+  // `pnpm run` sets npm_execpath to .../pnpm.cjs. Never treat that, or an
+  // npm-cli.js nested under a pnpm install, as the reviewed npm CLI.
+  if (/pnpm/i.test(execPath)) return false;
+  return basename(execPath).toLowerCase() === "npm-cli.js";
+}
+
+function npmCliBeside(nodeOrBinDirectory) {
+  return [
+    join(
+      nodeOrBinDirectory,
+      "..",
+      "lib",
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    ),
+    join(nodeOrBinDirectory, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(nodeOrBinDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
+  ];
+}
+
+export function resolveNpmCli() {
+  const execPath = process.env.npm_execpath;
+  if (execPath !== undefined && isNpmCliPath(execPath)) {
+    return execPath;
+  }
+  // `pnpm run` sets npm_execpath to pnpm. Pack, publish, and registry
+  // lookups still use the reviewed npm CLI, resolved without a shell.
+  const candidates = npmCliBeside(dirname(process.execPath));
+  const pathEnv = process.env.PATH ?? "";
+  const delimiter = process.platform === "win32" ? ";" : ":";
+  for (const directory of pathEnv.split(delimiter)) {
+    if (directory !== "") candidates.push(...npmCliBeside(directory));
+  }
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  fail(
+    "could not resolve the npm CLI used to pack and publish; Node's bundled npm is required",
+  );
+}
+
+function runWorkspace(arguments_, options = {}) {
+  const execPath = process.env.npm_execpath;
+  if (execPath === undefined) {
     fail(
-      "release commands must be run through npm (npm_execpath is not set); use npm run release:check, release:pack, or release:publish",
+      "release commands must be run through a package manager script (npm_execpath is not set); use pnpm run release:check, release:pack, or release:publish",
     );
   }
-  return run(process.execPath, [npmExecPath, ...arguments_], options);
+  return run(process.execPath, [execPath, ...arguments_], options);
+}
+
+function runNpm(arguments_, options = {}) {
+  return run(process.execPath, [resolveNpmCli(), ...arguments_], options);
 }
 
 function gitCommand() {
@@ -201,19 +249,159 @@ export function validateReleaseTag(options = {}) {
   return { headCommit, releaseTag };
 }
 
+export function lockfileImporterBlock(lockfile, importer) {
+  const heading = `  ${importer}:`;
+  const lines = lockfile.split("\n");
+  const start = lines.findIndex((line) => line === heading);
+  if (start === -1) return null;
+  const block = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^  \S/u.test(line) || /^[^\s]/u.test(line)) break;
+    block.push(line);
+  }
+  return block.join("\n");
+}
+
+export function unquoteYamlScalar(raw) {
+  if (
+    raw.length >= 2 &&
+    ((raw.startsWith("'") && raw.endsWith("'")) ||
+      (raw.startsWith('"') && raw.endsWith('"')))
+  ) {
+    return raw.slice(1, -1);
+  }
+  return raw;
+}
+
+export function parseImporterDependencyPins(block) {
+  const pins = {};
+  const pattern =
+    /^ {6}('[^']+'|"[^"]+"|[A-Za-z0-9@/._-]+):\n {8}specifier: (\S+)\n {8}version: (\S+)$/gmu;
+  for (const match of block.matchAll(pattern)) {
+    pins[unquoteYamlScalar(match[1])] = {
+      specifier: unquoteYamlScalar(match[2]),
+      version: unquoteYamlScalar(match[3]),
+    };
+  }
+  return pins;
+}
+
+function parseSemver(text) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+].*)?$/u.exec(
+    text,
+  );
+  if (match === null) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+function compareSemver(left, right) {
+  return (
+    left.major - right.major ||
+    left.minor - right.minor ||
+    left.patch - right.patch
+  );
+}
+
+function lockResolvedVersion(version) {
+  const paren = version.indexOf("(");
+  return paren === -1 ? version : version.slice(0, paren);
+}
+
+function isRangeSpecifier(specifier) {
+  return (
+    specifier === "*" ||
+    specifier === "x" ||
+    specifier.startsWith("^") ||
+    specifier.startsWith("~") ||
+    /^(>=|>|<=|<|=)/u.test(specifier)
+  );
+}
+
+function isPrereleaseVersion(version) {
+  return /-(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)(?:\+|$)/u.test(version);
+}
+
+export function resolvedVersionSatisfies(resolved, specifier) {
+  const version = lockResolvedVersion(resolved);
+  if (!isRangeSpecifier(specifier)) {
+    return version === specifier;
+  }
+  if (specifier === "*" || specifier === "x") {
+    return parseSemver(version) !== null && !isPrereleaseVersion(version);
+  }
+  const parsed = parseSemver(version);
+  if (parsed === null || isPrereleaseVersion(version)) return false;
+  const caret = /^\^((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$/u.exec(
+    specifier,
+  );
+  if (caret !== null) {
+    const base = parseSemver(caret[1]);
+    if (base === null || compareSemver(parsed, base) < 0) return false;
+    if (base.major > 0) return parsed.major === base.major;
+    if (base.minor > 0)
+      return parsed.major === 0 && parsed.minor === base.minor;
+    return (
+      parsed.major === 0 && parsed.minor === 0 && parsed.patch === base.patch
+    );
+  }
+  const tilde = /^~((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$/u.exec(
+    specifier,
+  );
+  if (tilde !== null) {
+    const base = parseSemver(tilde[1]);
+    return (
+      base !== null &&
+      compareSemver(parsed, base) >= 0 &&
+      parsed.major === base.major &&
+      parsed.minor === base.minor
+    );
+  }
+  return false;
+}
+
+export function assertPnpmLockfileSynchronized(
+  lockfile,
+  importer,
+  dependencies,
+) {
+  if (!/^lockfileVersion:/u.test(lockfile)) {
+    fail("pnpm-lock.yaml is missing lockfileVersion");
+  }
+  const block = lockfileImporterBlock(lockfile, importer);
+  if (block === null) {
+    fail(`${importer} is missing from pnpm-lock.yaml`);
+  }
+  const pins = parseImporterDependencyPins(block);
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    const entry = pins[name];
+    if (
+      entry === undefined ||
+      entry.specifier !== specifier ||
+      !resolvedVersionSatisfies(entry.version, specifier)
+    ) {
+      fail(
+        `${name}@${specifier} is not synchronized with its own pnpm-lock.yaml entry`,
+      );
+    }
+  }
+}
+
 export async function validateRepository(options = {}) {
   const root = resolve(options.root ?? defaultRoot());
   const rootManifest = await readJson(join(root, "package.json"));
   const packageDirectory = join(root, "packages", PACKAGE.directory);
   const manifest = await readJson(join(packageDirectory, "package.json"));
-  const lockfile = await readJson(join(root, "package-lock.json"));
-  const lockEntry = lockfile.packages?.[`packages/${PACKAGE.directory}`];
+  const lockfile = await readFile(join(root, "pnpm-lock.yaml"), "utf8");
 
   if (
     rootManifest.private !== true ||
-    rootManifest.packageManager !== `npm@${REVIEWED_NPM_VERSION}`
+    rootManifest.packageManager !== `pnpm@${REVIEWED_PNPM_VERSION}`
   ) {
-    fail(`the private root must pin npm@${REVIEWED_NPM_VERSION}`);
+    fail(`the private root must pin pnpm@${REVIEWED_PNPM_VERSION}`);
   }
   if (
     manifest.name !== PACKAGE.name ||
@@ -258,9 +446,11 @@ export async function validateRepository(options = {}) {
   }
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
-  if (lockEntry?.version !== manifest.version) {
-    fail(`${PACKAGE.name} version is not synchronized with package-lock.json`);
-  }
+  assertPnpmLockfileSynchronized(
+    lockfile,
+    `packages/${PACKAGE.directory}`,
+    manifest.dependencies ?? {},
+  );
 
   const publicWorkspaces = [];
   for (const entry of await readdir(join(root, "packages"), {
@@ -392,7 +582,7 @@ export async function prepareRelease(options = {}) {
     fail(`release output directory must be empty: ${output}`);
   }
 
-  runNpm(["run", "build"], { cwd: root });
+  runWorkspace(["run", "build"], { cwd: root });
   const result = runNpm(
     ["pack", packageDirectory, "--json", "--pack-destination", output],
     { cwd: root, capture: true },
