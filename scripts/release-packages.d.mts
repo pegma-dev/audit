@@ -22,7 +22,24 @@ export interface ReleaseCommandOptions extends ValidationOptions {
 export interface PublicPackageManifest {
   readonly name: string;
   readonly version: string;
+  readonly dependencies?: Readonly<Record<string, string>>;
+  readonly publishConfig?: Readonly<Record<string, unknown>>;
   readonly [key: string]: unknown;
+}
+
+export interface PreparedReleaseManifest {
+  readonly schemaVersion: 1;
+  readonly gitCommit: string;
+  readonly releaseTag: string | null;
+  readonly package: {
+    readonly name: string;
+    readonly version: string;
+    readonly tarball: string;
+    readonly integrity: string;
+    readonly sha256: string;
+    readonly shasum: string;
+    readonly files: readonly { readonly path: string; readonly size: number }[];
+  };
 }
 
 export interface ValidationResult {
@@ -76,6 +93,25 @@ export function findInstallTimeScript(
 
 export function verifyReviewedNpmTarball(bytes: Uint8Array | string): string;
 
+export function validatePackageManifest(
+  manifest: PublicPackageManifest,
+  options?: {
+    readonly label?: string;
+    readonly expectedName?: string;
+    readonly expectedVersion?: string;
+  },
+): PublicPackageManifest;
+
+export function comparePackedManifest(
+  source: PublicPackageManifest,
+  packed: PublicPackageManifest,
+): void;
+
+export function validateReleaseInventory(
+  directory: string,
+  expectedTarball: string,
+): Promise<void>;
+
 export function parseArguments(
   arguments_: readonly string[],
 ): ReleaseCommandOptions;
@@ -97,7 +133,7 @@ export function decidePublication(
 
 export function prepareRelease(
   options?: ReleaseCommandOptions,
-): Promise<{ manifestPath: string; manifest: unknown }>;
+): Promise<{ manifestPath: string; manifest: PreparedReleaseManifest }>;
 
 export function publishPreparedRelease(
   options?: ReleaseCommandOptions,
