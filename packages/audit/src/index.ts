@@ -224,7 +224,31 @@ function requireSequence(value: number): number {
   return value;
 }
 
+const OBJECT_CONSTRUCTOR_SOURCE = Function.prototype.toString.call(Object);
+
+function isPlainDetailsContainer(value: unknown): value is AuditDetails {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === null) return true;
+  if (
+    Object.getPrototypeOf(prototype) !== null ||
+    !Object.prototype.hasOwnProperty.call(prototype, "constructor")
+  ) {
+    return false;
+  }
+  const constructor = (prototype as { constructor: unknown }).constructor;
+  return (
+    typeof constructor === "function" &&
+    Function.prototype.toString.call(constructor) === OBJECT_CONSTRUCTOR_SOURCE
+  );
+}
+
 function requireDetails(details: AuditDetails): AuditDetails {
+  if (!isPlainDetailsContainer(details)) {
+    throw new AuditError("details must be a plain object");
+  }
   const copied: Record<string, AuditDetail> = {};
   for (const key of Object.keys(details).sort()) {
     const value = details[key];

@@ -1,4 +1,5 @@
 import { createMemoryStore, defineCollection } from "@pegma/storage-core";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -98,6 +99,21 @@ const event = (overrides: Partial<AuditEvent> = {}): AuditEvent =>
     ...overrides,
   });
 
+const rawEvent = (overrides: Partial<AuditEvent> = {}): AuditEvent => ({
+  id: "evt_1",
+  occurredAt: "2026-07-26T12:00:00.000Z",
+  actor: { kind: "principal", principalId: "prn_admin" },
+  action: "account.member.added",
+  subject: "mem_1",
+  ...overrides,
+});
+
+const nullPrototypeDetails = (): AuditDetails => {
+  const details = Object.create(null) as AuditDetails;
+  (details as Record<string, string>)["role"] = "support";
+  return details;
+};
+
 describe("the event shape", () => {
   it("survives a round trip through a flat record", () => {
     const original = event({
@@ -127,6 +143,89 @@ describe("the event shape", () => {
     expect(() =>
       event({ details: { nested: {} as unknown as string } }),
     ).toThrow(/details.nested/);
+  });
+
+  it.each([
+    ["null", null],
+    ["array", []],
+    ["string", "support"],
+    ["number", 2],
+    ["boolean", true],
+    ["function", () => undefined],
+    ["symbol", Symbol("detail")],
+    ["date", new Date("2026-07-26T12:00:00.000Z")],
+    ["regular expression", /detail/u],
+    ["map", new Map()],
+    ["set", new Set()],
+  ])(
+    "rejects a %s details container at every write entry point",
+    async (_, value) => {
+      const collection = records();
+      const candidate = rawEvent({
+        id: `evt_invalid_${String(_)}`,
+        details: value as unknown as AuditDetails,
+      });
+
+      expect(() => auditEvent(candidate)).toThrow(
+        /details must be a plain object/,
+      );
+      expect(() => encodeAuditEvent(candidate)).toThrow(
+        /details must be a plain object/,
+      );
+      expect(() => audit.action(candidate)).toThrow(
+        /details must be a plain object/,
+      );
+      await expect(audit.append(collection, candidate)).rejects.toThrow(
+        /details must be a plain object/,
+      );
+      expect(await audit.history(collection, PARTITION)).toEqual([]);
+    },
+  );
+
+  it("accepts a null-prototype details bag at every write entry point", async () => {
+    const collection = records();
+    const direct = rawEvent({
+      id: "evt_null_prototype_direct",
+      details: nullPrototypeDetails(),
+    });
+    const encoded = encodeAuditEvent(
+      rawEvent({
+        id: "evt_null_prototype_encoded",
+        details: nullPrototypeDetails(),
+      }),
+    );
+
+    expect(auditEvent(rawEvent({ details: {} })).details).toEqual({});
+    expect(auditEvent(direct).details).toEqual({ role: "support" });
+    expect(encoded["auditDetails"]).toBe('{"role":"support"}');
+    await expect(
+      collection.transact(PARTITION, [
+        audit.action(
+          rawEvent({
+            id: "evt_null_prototype_action",
+            details: nullPrototypeDetails(),
+          }),
+        ),
+      ]),
+    ).resolves.toMatchObject({ committed: true });
+    await expect(
+      audit.append(
+        collection,
+        rawEvent({
+          id: "evt_null_prototype_append",
+          details: nullPrototypeDetails(),
+        }),
+      ),
+    ).resolves.toMatchObject({ appended: true });
+    expect(await audit.history(collection, PARTITION)).toHaveLength(2);
+  });
+
+  it("accepts an ordinary details bag from another realm", () => {
+    const details = runInNewContext('({ role: "support" })') as AuditDetails;
+
+    expect(auditEvent(rawEvent({ details })).details).toEqual({
+      role: "support",
+    });
   });
 
   it("rejects a timestamp only Date.parse would accept", () => {
@@ -250,7 +349,9 @@ describe("an audit action inside the caller's transaction", () => {
     // action is perfectly valid on its own, and must still not land.
     const outcome = await collection.transact(PARTITION, [
       { action: "insert", value: member },
-      audit.action(event({ id: "evt_orphan" })),
+      audit.action(
+        rawEvent({ id: "evt_orphan", details: nullPrototypeDetails() }),
+      ),
     ]);
 
     expect(outcome).toMatchObject({ committed: false, reason: "exists" });

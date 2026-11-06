@@ -38,19 +38,25 @@ The release workflow verifies that the tag:
 
 - is a stable annotated `vX.Y.Z` tag signed by an allowed signer;
 - matches the package version;
-- points to the checkout and the GitHub release-event commit; and
+- points to the GitHub release-event commit; and
 - is contained in `origin/main`.
 
-Its preparation job has no OIDC permission. It installs dependencies with
-the pinned pnpm, installs the reviewed npm version without dependency
-caching, runs the full gate, builds and packs once,
-smoke-tests the tarball from a clean consumer, records its SHA-1 and SHA-512
-integrity, and uploads the exact prepared artifact.
+The preparation job authenticates the tag in a temporary bare repository
+before checkout or dependency installation. It then checks out the immutable
+release-event commit without retained credentials, installs dependencies with
+the pinned pnpm, installs the reviewed npm bytes, runs the full gate, and
+builds and packs once. The packed manifest is checked against the reviewed
+source manifest, and the output is sealed as exactly one manifest and one
+tarball before upload. A separate job downloads that sealed artifact and
+imports it from a clean consumer without OIDC permission.
 
-Only the `npm-publish` job receives `id-token: write`. It installs no
-dependencies and does not download pnpm. It invokes the publish helper with
-`node`, verifies the prepared manifest and tarball hashes against the
-release commit, and publishes that tarball with npm provenance.
+Only the `npm-publish` job receives `id-token: write`. It performs no checkout,
+installs no project dependencies, and does not download pnpm. It authenticates
+the tag again in a fresh bare repository, installs the reviewed npm bytes,
+downloads the prepared artifact by its upload id, and verifies the preparation
+manifest digest, exact two-file inventory, release commit, and tarball SHA-256
+and SHA-512. Registry lookup and publication run from a fresh empty directory
+with empty npm configuration files and a minimal environment.
 
 ## Safe retry
 

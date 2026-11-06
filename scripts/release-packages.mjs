@@ -2,17 +2,16 @@ import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
-  mkdtemp,
+  lstat,
   mkdir,
   readFile,
   readdir,
-  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const PACKAGE = {
   directory: "audit",
@@ -42,6 +41,40 @@ const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
  * here instead, where they belong.
  */
 const INSTALL_TIME_SCRIPTS = ["preinstall", "install", "postinstall"];
+const DEPENDENCY_FIELDS = [
+  "dependencies",
+  "optionalDependencies",
+  "peerDependencies",
+];
+const RELEASE_MANIFEST_FIELDS = [
+  "name",
+  "version",
+  "private",
+  "description",
+  "license",
+  "type",
+  "sideEffects",
+  "publishConfig",
+  "files",
+  "exports",
+  "imports",
+  "main",
+  "module",
+  "types",
+  "typings",
+  "bin",
+  "engines",
+  "os",
+  "cpu",
+  "repository",
+  "dependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "bundledDependencies",
+  "bundleDependencies",
+  "scripts",
+];
 
 export const RELEASE_PACKAGES = [PACKAGE];
 
@@ -156,8 +189,13 @@ function gitCommand() {
 function hashTarball(bytes) {
   return {
     shasum: createHash("sha1").update(bytes).digest("hex"),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
     integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
   };
+}
+
+function packageTarballName(name, version) {
+  return `${name.slice(1).replace("/", "-")}-${version}.tgz`;
 }
 
 /**
@@ -390,6 +428,95 @@ export function assertPnpmLockfileSynchronized(
   }
 }
 
+function isPlainRecord(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+export function validatePackageManifest(manifest, options = {}) {
+  const label = options.label ?? PACKAGE.name;
+  const expectedName = options.expectedName ?? PACKAGE.name;
+  const expectedVersion = options.expectedVersion;
+  if (
+    !isPlainRecord(manifest) ||
+    manifest.name !== expectedName ||
+    !STABLE_SEMVER.test(manifest.version) ||
+    (expectedVersion !== undefined && manifest.version !== expectedVersion) ||
+    manifest.private === true ||
+    manifest.license !== "MIT" ||
+    manifest.type !== "module" ||
+    manifest.engines?.node !== ">=22" ||
+    manifest.repository?.type !== "git" ||
+    manifest.repository?.url !== REPOSITORY_URL ||
+    manifest.repository?.directory !== `packages/${PACKAGE.directory}`
+  ) {
+    fail(`${label} has invalid public package metadata`);
+  }
+  if (
+    !isPlainRecord(manifest.publishConfig) ||
+    !isDeepStrictEqual(Object.keys(manifest.publishConfig).sort(), [
+      "access",
+    ]) ||
+    manifest.publishConfig.access !== "public"
+  ) {
+    fail(`${label} has invalid publish configuration`);
+  }
+  if (
+    !Array.isArray(manifest.files) ||
+    manifest.files.length === 0 ||
+    manifest.files.some(
+      (entry) => typeof entry !== "string" || !entry.startsWith("dist/"),
+    ) ||
+    typeof manifest.scripts?.prepack !== "string" ||
+    !manifest.scripts.prepack.includes("build")
+  ) {
+    fail(`${label} has an invalid package allowlist or prepack`);
+  }
+  const installScript = findInstallTimeScript(manifest.scripts);
+  if (installScript !== null) {
+    fail(`${label} must not define the install-time script ${installScript}`);
+  }
+  for (const field of DEPENDENCY_FIELDS) {
+    const dependencies = manifest[field];
+    if (field === "dependencies" && !isPlainRecord(dependencies)) {
+      fail(`${label} dependencies must be an object`);
+    }
+    if (dependencies === undefined) continue;
+    if (!isPlainRecord(dependencies)) {
+      fail(`${label} ${field} must be an object`);
+    }
+    for (const [name, version] of Object.entries(dependencies)) {
+      if (name.startsWith("@pegma/") && !STABLE_SEMVER.test(version)) {
+        fail(`${label} must pin ${name} to an exact stable version`);
+      }
+    }
+  }
+  const targets = exportTargets(manifest.exports);
+  if (
+    targets.length === 0 ||
+    targets.some(
+      (target) =>
+        typeof target !== "string" ||
+        !target.startsWith("./dist/") ||
+        target.includes(".."),
+    )
+  ) {
+    fail(`${label} exports must point into dist`);
+  }
+  return manifest;
+}
+
+export function comparePackedManifest(source, packed) {
+  for (const field of RELEASE_MANIFEST_FIELDS) {
+    if (!isDeepStrictEqual(packed[field], source[field])) {
+      fail(`packed package manifest changed ${field}`);
+    }
+  }
+}
+
 export async function validateRepository(options = {}) {
   const root = resolve(options.root ?? defaultRoot());
   const rootManifest = await readJson(join(root, "package.json"));
@@ -403,47 +530,7 @@ export async function validateRepository(options = {}) {
   ) {
     fail(`the private root must pin pnpm@${REVIEWED_PNPM_VERSION}`);
   }
-  if (
-    manifest.name !== PACKAGE.name ||
-    !STABLE_SEMVER.test(manifest.version) ||
-    manifest.private === true ||
-    manifest.license !== "MIT" ||
-    manifest.type !== "module" ||
-    manifest.publishConfig?.access !== "public" ||
-    manifest.engines?.node !== ">=22" ||
-    manifest.repository?.type !== "git" ||
-    manifest.repository?.url !== REPOSITORY_URL ||
-    manifest.repository?.directory !== `packages/${PACKAGE.directory}`
-  ) {
-    fail(`${PACKAGE.name} has invalid public package metadata`);
-  }
-  if (
-    !Array.isArray(manifest.files) ||
-    manifest.files.length === 0 ||
-    manifest.files.some((entry) => !entry.startsWith("dist/")) ||
-    typeof manifest.scripts?.prepack !== "string" ||
-    !manifest.scripts.prepack.includes("build")
-  ) {
-    fail(`${PACKAGE.name} has an unsafe package allowlist or prepack`);
-  }
-  const installScript = findInstallTimeScript(manifest.scripts);
-  if (installScript !== null) {
-    fail(
-      `${PACKAGE.name} must not define the install-time script ${installScript}`,
-    );
-  }
-  const targets = exportTargets(manifest.exports);
-  if (
-    targets.length === 0 ||
-    targets.some(
-      (target) =>
-        typeof target !== "string" ||
-        !target.startsWith("./dist/") ||
-        target.includes(".."),
-    )
-  ) {
-    fail(`${PACKAGE.name} exports must point into dist`);
-  }
+  validatePackageManifest(manifest);
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
   assertPnpmLockfileSynchronized(
@@ -533,39 +620,31 @@ function verifyPackedFiles(manifest, files) {
   }
 }
 
-async function smokeTestTarball(tarball, manifest) {
-  const directory = await mkdtemp(join(tmpdir(), "audit-release-smoke-"));
+function readPackedPackageManifest(tarball) {
+  const result = run("tar", ["-xOf", tarball, "package/package.json"], {
+    capture: true,
+  });
   try {
-    await writeFile(
-      join(directory, "package.json"),
-      '{"name":"audit-release-smoke","private":true,"type":"module"}\n',
-    );
-    runNpm(
-      [
-        "install",
-        "--ignore-scripts",
-        "--no-audit",
-        "--no-fund",
-        "--package-lock=false",
-        tarball,
-      ],
-      { cwd: directory, capture: true },
-    );
-    for (const key of Object.keys(manifest.exports)) {
-      const specifier =
-        key === "." ? manifest.name : `${manifest.name}${key.slice(1)}`;
-      run(
-        process.execPath,
-        [
-          "--input-type=module",
-          "--eval",
-          `await import(${JSON.stringify(specifier)})`,
-        ],
-        { cwd: directory, capture: true },
-      );
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error("packed package manifest is not valid JSON", {
+      cause: error,
+    });
+  }
+}
+
+export async function validateReleaseInventory(directory, expectedTarball) {
+  const expected = ["package-manifest.json", expectedTarball].sort();
+  const entries = await readdir(directory, { withFileTypes: true });
+  const names = entries.map(({ name }) => name).sort();
+  if (!isDeepStrictEqual(names, expected)) {
+    fail("release output must contain only its manifest and tarball");
+  }
+  for (const entry of entries) {
+    const details = await lstat(join(directory, entry.name));
+    if (!entry.isFile() || entry.isSymbolicLink() || !details.isFile()) {
+      fail(`release output entry must be a regular file: ${entry.name}`);
     }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
   }
 }
 
@@ -588,16 +667,26 @@ export async function prepareRelease(options = {}) {
     { cwd: root, capture: true },
   );
   const [packed] = JSON.parse(result.stdout);
+  const expectedTarball = packageTarballName(manifest.name, manifest.version);
   if (
     packed?.name !== manifest.name ||
     packed?.version !== manifest.version ||
-    typeof packed.filename !== "string" ||
+    packed.filename !== expectedTarball ||
+    typeof packed.integrity !== "string" ||
+    typeof packed.shasum !== "string" ||
     !Array.isArray(packed.files)
   ) {
     fail("npm pack returned invalid metadata");
   }
   verifyPackedFiles(manifest, packed.files);
   const tarballPath = join(output, basename(packed.filename));
+  const packedManifest = readPackedPackageManifest(tarballPath);
+  validatePackageManifest(packedManifest, {
+    label: "packed package manifest",
+    expectedName: manifest.name,
+    expectedVersion: manifest.version,
+  });
+  comparePackedManifest(manifest, packedManifest);
   const hashes = hashTarball(await readFile(tarballPath));
   if (
     !safeEqual(hashes.integrity, packed.integrity) ||
@@ -605,8 +694,6 @@ export async function prepareRelease(options = {}) {
   ) {
     fail("tarball hashes do not match npm pack metadata");
   }
-  await smokeTestTarball(tarballPath, manifest);
-
   const prepared = {
     schemaVersion: 1,
     gitCommit,
@@ -616,6 +703,7 @@ export async function prepareRelease(options = {}) {
       version: manifest.version,
       tarball: basename(tarballPath),
       integrity: hashes.integrity,
+      sha256: hashes.sha256,
       shasum: hashes.shasum,
       files: packed.files
         .map(({ path, size }) => ({ path, size }))
@@ -624,6 +712,7 @@ export async function prepareRelease(options = {}) {
   };
   const manifestPath = join(output, "package-manifest.json");
   await writeFile(manifestPath, `${JSON.stringify(prepared, null, 2)}\n`);
+  await validateReleaseInventory(output, basename(tarballPath));
   return { manifestPath, manifest: prepared };
 }
 
@@ -690,6 +779,7 @@ async function verifyPreparedManifest(path) {
     record?.name !== PACKAGE.name ||
     !STABLE_SEMVER.test(record.version) ||
     typeof record.integrity !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.sha256) ||
     typeof record.shasum !== "string" ||
     !Array.isArray(record.files)
   ) {
@@ -702,18 +792,18 @@ async function verifyPreparedManifest(path) {
   if (!safeEqual(currentCommit, prepared.gitCommit)) {
     fail("prepared package manifest commit does not match the checkout");
   }
-  const expectedTarball = `${PACKAGE.name
-    .slice(1)
-    .replace("/", "-")}-${record.version}.tgz`;
+  const expectedTarball = packageTarballName(PACKAGE.name, record.version);
   if (record.tarball !== expectedTarball)
     fail("prepared tarball name is invalid");
   const tarball = resolve(dirname(path), record.tarball);
   if (dirname(tarball) !== resolve(dirname(path))) {
     fail("prepared tarball must be beside the package manifest");
   }
+  await validateReleaseInventory(dirname(path), record.tarball);
   const hashes = hashTarball(await readFile(tarball));
   if (
     !safeEqual(hashes.integrity, record.integrity) ||
+    !safeEqual(hashes.sha256, record.sha256) ||
     !safeEqual(hashes.shasum, record.shasum)
   ) {
     fail("prepared tarball has changed");

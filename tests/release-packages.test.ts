@@ -1,18 +1,29 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
   REVIEWED_NPM,
   REVIEWED_PNPM,
   assertPnpmLockfileSynchronized,
+  comparePackedManifest,
   decidePublication,
   findInstallTimeScript,
   parseArguments,
   resolveNpmCli,
   resolvedVersionSatisfies,
+  validatePackageManifest,
+  validateReleaseInventory,
   validateReleaseTag,
   validateRepository,
   verifyReviewedNpmTarball,
@@ -34,6 +45,18 @@ function run(command: string, arguments_: string[], cwd?: string): string {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+function corepackPnpmCli(): string {
+  const nodeDirectory = dirname(process.execPath);
+  const candidates = [
+    join(nodeDirectory, "node_modules/corepack/dist/pnpm.js"),
+    resolve(nodeDirectory, "../lib/node_modules/corepack/dist/pnpm.js"),
+  ];
+  const found = candidates.find(existsSync);
+  if (found === undefined)
+    throw new Error("could not resolve Corepack's pnpm CLI");
+  return found;
 }
 
 describe("release package metadata", () => {
@@ -82,7 +105,11 @@ describe("release package metadata", () => {
       "utf8",
     );
     expect(workflow).toContain(`REVIEWED_NPM_VERSION: ${REVIEWED_NPM.version}`);
-    expect(workflow).toContain("verify-npm --tarball");
+    expect(workflow).toContain(
+      `REVIEWED_NPM_INTEGRITY: ${REVIEWED_NPM.integrity}`,
+    );
+    expect(workflow).toContain('createHash("sha512")');
+    expect(workflow).not.toContain("verify-npm --tarball");
     // Installing the registry spec directly would trust whatever bytes the
     // registry serves for the tool that packs and publishes the release.
     expect(workflow).not.toContain(`npm@${REVIEWED_NPM.version}`);
@@ -101,6 +128,59 @@ describe("release package metadata", () => {
       } else {
         process.env.npm_execpath = previous;
       }
+    }
+  });
+
+  it("revalidates the manifest produced by npm pack", async () => {
+    const { manifest } = await validateRepository();
+    expect(() =>
+      validatePackageManifest({
+        ...manifest,
+        publishConfig: { access: "public", registry: "https://example.test" },
+      }),
+    ).toThrow("publish configuration");
+    expect(() =>
+      comparePackedManifest(manifest, {
+        ...manifest,
+        dependencies: { ...manifest.dependencies, "@pegma/spine": "0.1.2" },
+      }),
+    ).toThrow("changed dependencies");
+  });
+
+  it("seals a packed release as one manifest and one tarball", async () => {
+    const output = mkdtempSync(join(tmpdir(), "audit-release-output-"));
+    try {
+      run(
+        process.execPath,
+        [corepackPnpmCli(), "run", "release:pack", "--", "--output", output],
+        process.cwd(),
+      );
+      const manifestPath = join(output, "package-manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        package: { tarball: string; sha256: string; integrity: string };
+      };
+      const names = readdirSync(output).sort();
+      expect(names).toEqual(
+        [manifest.package.tarball, "package-manifest.json"].sort(),
+      );
+      await expect(
+        validateReleaseInventory(output, manifest.package.tarball),
+      ).resolves.toBeUndefined();
+      const bytes = readFileSync(join(output, manifest.package.tarball));
+      expect(manifest.package.sha256).toBe(
+        createHash("sha256").update(bytes).digest("hex"),
+      );
+      expect(manifest.package.integrity).toBe(
+        `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
+      );
+      expect(manifestPath).toBe(join(output, "package-manifest.json"));
+
+      writeFileSync(join(output, ".npmrc"), "registry=https://example.test\n");
+      await expect(
+        validateReleaseInventory(output, manifest.package.tarball),
+      ).rejects.toThrow("only its manifest and tarball");
+    } finally {
+      rmSync(output, { recursive: true, force: true });
     }
   });
 
@@ -271,7 +351,7 @@ describe("release source authentication", () => {
     }
   });
 
-  it("keeps preparation outside the OIDC-enabled publisher job", () => {
+  it("keeps preparation and smoke testing outside the OIDC-enabled job", () => {
     const workflow = readFileSync(
       join(process.cwd(), ".github", "workflows", "publish.yml"),
       "utf8",
@@ -282,21 +362,57 @@ describe("release source authentication", () => {
     const header = workflow.slice(0, jobsIndex);
     const jobs = workflow.slice(jobsIndex + jobsMarker.length);
     const prepareStart = jobs.indexOf("  prepare:");
+    const smokeStart = jobs.indexOf("\n  smoke:");
     const publishStart = jobs.indexOf("\n  publish:");
     expect(header).not.toContain("id-token: write");
     expect(prepareStart).toBeGreaterThanOrEqual(0);
-    expect(publishStart).toBeGreaterThan(prepareStart);
-    const prepare = jobs.slice(prepareStart, publishStart);
+    expect(smokeStart).toBeGreaterThan(prepareStart);
+    expect(publishStart).toBeGreaterThan(smokeStart);
+    const prepare = jobs.slice(prepareStart, smokeStart);
+    const smoke = jobs.slice(smokeStart, publishStart);
     const publish = jobs.slice(publishStart);
     expect(prepare).not.toContain("id-token: write");
+    expect(smoke).not.toContain("id-token: write");
     expect(publish).toContain("id-token: write");
-    expect(publish).not.toContain("npm ci");
-    expect(publish).not.toContain("npm install");
     expect(publish).not.toContain("pnpm");
     expect(publish).not.toContain("corepack");
-    expect(publish).toContain("node scripts/release-packages.mjs publish");
+    expect(publish).not.toContain("actions/checkout");
+    expect(publish).not.toContain("scripts/release-packages.mjs");
+    expect(publish).toContain("needs: [prepare, smoke]");
+    expect(smoke).toContain("Import from a clean consumer");
+    expect(workflow).toContain("include-hidden-files: false");
+    expect(workflow).toContain("manifest_digest:");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
+  });
+
+  it("authenticates release input before checkout and keeps job env expressions portable", () => {
+    const workflow = readFileSync(
+      join(process.cwd(), ".github", "workflows", "publish.yml"),
+      "utf8",
+    );
+    const firstAuthentication = workflow.indexOf(
+      "- name: Authenticate the release tag",
+    );
+    const firstCheckout = workflow.indexOf("uses: actions/checkout@");
+    expect(firstAuthentication).toBeGreaterThanOrEqual(0);
+    expect(firstCheckout).toBeGreaterThan(firstAuthentication);
+    expect(workflow).toContain("git init --bare");
+    expect(workflow).toContain('git -C "${repository}" verify-tag');
+    expect(workflow).toContain("merge-base --is-ancestor");
+    expect(workflow).toContain("ref: ${{ github.sha }}");
+    expect(workflow).toContain("persist-credentials: false");
+    expect(workflow).toContain('[[ "${RELEASE_PRERELEASE}" != "false" ]]');
+    expect(workflow).toContain("^[0-9A-Fa-f]{40}$");
+
+    const jobEnvBlocks = [
+      ...workflow.matchAll(/^    env:\n((?:^      [^\n]*\n)+)/gmu),
+    ].map((match) => match[1]);
+    expect(jobEnvBlocks.length).toBeGreaterThan(0);
+    for (const block of jobEnvBlocks) {
+      expect(block).not.toContain("${{ runner.");
+      expect(block).not.toContain("${{ steps.");
+    }
   });
 });
 
